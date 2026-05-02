@@ -47,6 +47,8 @@ func main() {
 	typeChunkSizeFlag := flag.Int("type-chunk-size", 200, "ydotool dispatch chunk size in characters")
 	typeChunkDelayFlag := flag.Duration("type-chunk-delay", 20*time.Millisecond, "delay between ydotool chunks")
 	audioCuesFlag := flag.Bool("audio-cues", true, "play short tones on session open/close")
+	wlCopyBinaryFlag := flag.String("wl-copy-binary", "/usr/bin/wl-copy", "wl-copy binary path (clip-mode commit)")
+	previewBinaryFlag := flag.String("preview-binary", "", "dicta-preview binary path (empty = clip-mode disabled)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -156,7 +158,37 @@ func main() {
 		var cuer audio.Cuer = audio.NewSubprocessCuer(audio.CueConfig{
 			Disabled: !*audioCuesFlag,
 		})
-		sess = newSession(logger, typer, cuer, handler.asr, audioMon.VAD(), bus, ctx)
+
+		// Clip-mode wiring is optional: if --preview-binary is empty,
+		// the clipper and preview controller stay nil and Toggle("clip")
+		// returns ErrClipNotConfigured.
+		var clipper dispatch.Clipper
+		var preview previewController
+		if *previewBinaryFlag != "" {
+			cl, err := dispatch.NewSubprocessClipper(dispatch.ClipperConfig{
+				Binary: *wlCopyBinaryFlag,
+				Logger: logger,
+			})
+			if err != nil {
+				logger.Error("dispatch.clipper", "err", err)
+				os.Exit(1)
+			}
+			clipper = cl
+
+			pp, err := newPreviewProc(previewConfig{
+				Binary: *previewBinaryFlag,
+				Socket: socketPath,
+				Logger: logger,
+			})
+			if err != nil {
+				logger.Error("preview.controller", "err", err)
+				os.Exit(1)
+			}
+			preview = pp
+			logger.Info("clip-mode enabled", "preview", *previewBinaryFlag, "wl_copy", *wlCopyBinaryFlag)
+		}
+
+		sess = newSession(logger, typer, clipper, cuer, handler.asr, audioMon.VAD(), bus, preview, ctx)
 		audioMon.onUtterance = sess.OnUtterance
 		handler.session = sess
 		logger.Info("session orchestrator ready", "ydotool", *ydotoolBinaryFlag, "audio_cues", *audioCuesFlag)

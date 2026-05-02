@@ -106,7 +106,7 @@ func TestEndToEnd_TypeModeSession(t *testing.T) {
 
 	typer := &fakeTyper{}
 	cuer := &fakeCuer{}
-	sess := newSession(discardLogger(), typer, cuer, asrMon, audioMon.VAD(), nil, t.Context())
+	sess := newSession(discardLogger(), typer, nil, cuer, asrMon, audioMon.VAD(), nil, nil, t.Context())
 	audioMon.onUtterance = sess.OnUtterance
 
 	if err := sess.Toggle(t.Context(), "type"); err != nil {

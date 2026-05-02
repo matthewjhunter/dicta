@@ -47,11 +47,17 @@ func (h *stubHandler) ToggleTalk(ctx context.Context, mode string) error {
 }
 
 func (h *stubHandler) Commit(ctx context.Context, text string) error {
-	return control.ErrNotImplemented
+	if h.session == nil {
+		return control.ErrNotImplemented
+	}
+	return h.session.Commit(ctx, text)
 }
 
 func (h *stubHandler) Cancel(ctx context.Context) error {
-	return control.ErrNotImplemented
+	if h.session == nil {
+		return control.ErrNotImplemented
+	}
+	return h.session.Cancel(ctx)
 }
 
 func (h *stubHandler) MicList(ctx context.Context) ([]control.MicInfo, error) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -41,6 +42,87 @@ func (f *fakeTyper) Calls() []string {
 	out := make([]string, len(f.calls))
 	copy(out, f.calls)
 	return out
+}
+
+// fakeClipper records every Clip call.
+type fakeClipper struct {
+	mu    sync.Mutex
+	calls []string
+	err   error
+}
+
+func (f *fakeClipper) Clip(_ context.Context, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, text)
+	return f.err
+}
+
+func (f *fakeClipper) Calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.calls))
+	copy(out, f.calls)
+	return out
+}
+
+// fakePreview records spawn/kill events. Spawn returns errAlreadySpawned
+// if called twice without an intervening Kill, mirroring the real
+// previewProc semantics.
+type fakePreview struct {
+	mu       sync.Mutex
+	spawns   int
+	kills    int
+	running  bool
+	onExit   func()
+	spawnErr error
+}
+
+func (f *fakePreview) Spawn(_ context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.spawnErr != nil {
+		return f.spawnErr
+	}
+	if f.running {
+		return errAlreadySpawned
+	}
+	f.spawns++
+	f.running = true
+	return nil
+}
+
+func (f *fakePreview) Kill() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.running {
+		return nil
+	}
+	f.kills++
+	f.running = false
+	return nil
+}
+
+func (f *fakePreview) OnExit(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onExit = fn
+}
+
+func (f *fakePreview) FireExit() {
+	f.mu.Lock()
+	cb := f.onExit
+	f.running = false
+	f.mu.Unlock()
+	if cb != nil {
+		cb()
+	}
+}
+
+func (f *fakePreview) Stats() (spawns, kills int, running bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.spawns, f.kills, f.running
 }
 
 // fakeCuer records cue events.
@@ -89,7 +171,7 @@ func newTestSession(t *testing.T) (*session, *fakeTyper, *fakeCuer, *resettableV
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
-	s := newSession(discardLogger(), typer, cuer, asrMon, vad, nil, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, vad, nil, nil, t.Context())
 	return s, typer, cuer, vad, asrFake
 }
 
@@ -132,11 +214,13 @@ func TestSession_ToggleType_OpensAndCloses(t *testing.T) {
 	}
 }
 
-func TestSession_ClipNotImplemented(t *testing.T) {
+func TestSession_ClipNotConfiguredWithoutPreview(t *testing.T) {
+	// newTestSession provides no preview/clipper, so a clip toggle
+	// must surface ErrClipNotConfigured rather than half-opening.
 	s, _, _, _, _ := newTestSession(t)
 	err := s.Toggle(t.Context(), "clip")
-	if err != ErrClipNotImplemented {
-		t.Errorf("got %v want ErrClipNotImplemented", err)
+	if err != ErrClipNotConfigured {
+		t.Errorf("got %v want ErrClipNotConfigured", err)
 	}
 }
 
@@ -264,7 +348,7 @@ func TestSession_PublishesSessionStateOnOpenAndClose(t *testing.T) {
 	r := &recordingPush{}
 	bus.Subscribe([]string{"session_state"}, r.Push)
 
-	s := newSession(discardLogger(), typer, cuer, asrMon, &resettableVAD{}, bus, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, bus, nil, t.Context())
 
 	if err := s.Toggle(t.Context(), "type"); err != nil {
 		t.Fatal(err)
@@ -296,12 +380,176 @@ func TestSession_ToggleAcrossModesClosesFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Asking for clip while type is open must fail with the
-	// not-implemented sentinel — the type session stays open.
-	if err := s.Toggle(t.Context(), "clip"); err != ErrClipNotImplemented {
-		t.Errorf("clip toggle: got %v want ErrClipNotImplemented", err)
+	// not-configured sentinel — the type session stays open because
+	// the test rig has no preview wiring.
+	if err := s.Toggle(t.Context(), "clip"); err != ErrClipNotConfigured {
+		t.Errorf("clip toggle: got %v want ErrClipNotConfigured", err)
 	}
 	_, open := s.Snapshot()
 	if !open {
 		t.Error("type session should still be open after a rejected clip toggle")
+	}
+}
+
+// newClipSession is the clip-mode equivalent of newTestSession: the
+// session is wired with a fakeClipper and fakePreview so clip-mode
+// toggling, commit, and cancel can be exercised.
+func newClipSession(t *testing.T) (*session, *fakeClipper, *fakePreview, *fakeCuer) {
+	t.Helper()
+	typer := &fakeTyper{}
+	clipper := &fakeClipper{}
+	preview := &fakePreview{}
+	cuer := &fakeCuer{}
+	asrFake := &fakeASR{}
+	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
+		BackendName:    "fake",
+		HealthInterval: time.Hour,
+	})
+	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, nil, preview, t.Context())
+	return s, clipper, preview, cuer
+}
+
+func TestSession_ClipToggleSpawnsAndKillsPanel(t *testing.T) {
+	s, _, preview, cuer := newClipSession(t)
+
+	if err := s.Toggle(t.Context(), "clip"); err != nil {
+		t.Fatalf("Toggle open: %v", err)
+	}
+	mode, open := s.Snapshot()
+	if !(mode == "clip" && open) {
+		t.Errorf("after open: got mode=%q open=%v want clip/true", mode, open)
+	}
+	spawns, kills, running := preview.Stats()
+	if spawns != 1 || kills != 0 || !running {
+		t.Errorf("preview stats: spawns=%d kills=%d running=%v want 1/0/true", spawns, kills, running)
+	}
+
+	if err := s.Toggle(t.Context(), "clip"); err != nil {
+		t.Fatalf("Toggle close: %v", err)
+	}
+	spawns, kills, running = preview.Stats()
+	if spawns != 1 || kills != 1 || running {
+		t.Errorf("preview stats after close: spawns=%d kills=%d running=%v want 1/1/false", spawns, kills, running)
+	}
+
+	played := cuer.Played()
+	if len(played) != 2 {
+		t.Errorf("cues: got %d want 2", len(played))
+	}
+}
+
+func TestSession_ClipCommitDispatchesAndCloses(t *testing.T) {
+	s, clipper, preview, _ := newClipSession(t)
+	if err := s.Toggle(t.Context(), "clip"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Commit(t.Context(), "panel-edited text"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	calls := clipper.Calls()
+	if len(calls) != 1 || calls[0] != "panel-edited text" {
+		t.Errorf("clipper calls: got %v want [panel-edited text]", calls)
+	}
+
+	_, open := s.Snapshot()
+	if open {
+		t.Error("session should be closed after commit")
+	}
+	_, kills, running := preview.Stats()
+	if kills != 1 || running {
+		t.Errorf("preview should be killed after commit; kills=%d running=%v", kills, running)
+	}
+}
+
+func TestSession_ClipCancelClosesWithoutDispatch(t *testing.T) {
+	s, clipper, _, _ := newClipSession(t)
+	if err := s.Toggle(t.Context(), "clip"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Cancel(t.Context()); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+
+	if got := clipper.Calls(); len(got) != 0 {
+		t.Errorf("expected no clipper calls; got %v", got)
+	}
+	_, open := s.Snapshot()
+	if open {
+		t.Error("session should be closed after cancel")
+	}
+}
+
+func TestSession_CommitOutsideClipModeRejected(t *testing.T) {
+	s, clipper, _, _ := newClipSession(t)
+	// No Toggle — session is closed.
+	if err := s.Commit(t.Context(), "x"); err != ErrCommitOnlyValidInClipMode {
+		t.Errorf("got %v want ErrCommitOnlyValidInClipMode", err)
+	}
+	if got := clipper.Calls(); len(got) != 0 {
+		t.Errorf("clipper should not have been called; got %v", got)
+	}
+}
+
+func TestSession_CancelOutsideClipModeRejected(t *testing.T) {
+	s, _, _, _ := newClipSession(t)
+	if err := s.Cancel(t.Context()); err != ErrCancelOnlyValidInClipMode {
+		t.Errorf("got %v want ErrCancelOnlyValidInClipMode", err)
+	}
+}
+
+func TestSession_PanelExitClosesSession(t *testing.T) {
+	// When the panel subprocess exits on its own (e.g. user closed the
+	// window), the session must close so state stays in sync. The
+	// fakePreview's FireExit invokes the OnExit callback the session
+	// registered at construction.
+	s, _, preview, _ := newClipSession(t)
+	if err := s.Toggle(t.Context(), "clip"); err != nil {
+		t.Fatal(err)
+	}
+
+	preview.FireExit()
+
+	_, open := s.Snapshot()
+	if open {
+		t.Error("session should be closed after panel exits")
+	}
+}
+
+func TestSession_ClipSpawnFailureRollsBack(t *testing.T) {
+	// If the panel can't be spawned, Toggle must surface the error and
+	// leave the session closed (no half-open state).
+	s, _, preview, _ := newClipSession(t)
+	preview.spawnErr = errors.New("exec format error")
+
+	err := s.Toggle(t.Context(), "clip")
+	if err == nil {
+		t.Fatal("expected spawn error")
+	}
+	_, open := s.Snapshot()
+	if open {
+		t.Error("session should be closed after spawn failure")
+	}
+}
+
+func TestSession_TypeOpenClosesActiveClipFirst(t *testing.T) {
+	// D6 mutual exclusion: opening type-mode while clip is open must
+	// close clip-mode first (kill the panel), then open type.
+	s, _, preview, _ := newClipSession(t)
+	if err := s.Toggle(t.Context(), "clip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatalf("type toggle while clip open: %v", err)
+	}
+	mode, open := s.Snapshot()
+	if !(mode == "type" && open) {
+		t.Errorf("after type toggle: got mode=%q open=%v want type/true", mode, open)
+	}
+	_, kills, running := preview.Stats()
+	if kills != 1 || running {
+		t.Errorf("preview should be killed by D6; kills=%d running=%v", kills, running)
 	}
 }

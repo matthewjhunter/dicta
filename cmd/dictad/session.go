@@ -52,12 +52,14 @@ func (m sessionMode) String() string {
 // at submit time. When the session closes (or reopens) we bump the
 // epoch. Stale handlers compare epochs and drop instead of typing.
 type session struct {
-	logger *slog.Logger
-	typer  dispatch.Typer
-	cuer   audio.Cuer
-	asrMon *asrMonitor
-	vad    audio.VAD // optional: Reset() called on session-open if non-nil
-	bus    *eventBus // optional; nil = no event publish
+	logger  *slog.Logger
+	typer   dispatch.Typer
+	clipper dispatch.Clipper // optional; required for clip-mode commit
+	cuer    audio.Cuer
+	asrMon  *asrMonitor
+	vad     audio.VAD         // optional: Reset() called on session-open if non-nil
+	bus     *eventBus         // optional; nil = no event publish
+	preview previewController // optional; required for clip-mode
 
 	// daemonCtx is the long-lived parent ctx for typer dispatch. We do
 	// NOT derive a per-session ctx here because cancelling a session
@@ -72,20 +74,44 @@ type session struct {
 	epoch uint64
 }
 
-// ErrClipNotImplemented is returned when a clip-mode toggle is
-// requested in v1 (phase 9 lights this up).
-var ErrClipNotImplemented = fmt.Errorf("clip-mode is not yet implemented (phase 9)")
+// ErrClipNotConfigured is returned when a clip-mode toggle fires but
+// the daemon was not started with the clipper + preview wiring (e.g.
+// no --preview-binary flag). The control reply codes "not_implemented"
+// to match the wire shape of features that are absent vs misconfigured.
+var ErrClipNotConfigured = fmt.Errorf("clip-mode requires --preview-binary and --wl-copy-binary")
 
-func newSession(logger *slog.Logger, typer dispatch.Typer, cuer audio.Cuer, asrMon *asrMonitor, vad audio.VAD, bus *eventBus, daemonCtx context.Context) *session {
-	return &session{
+// ErrCommitOnlyValidInClipMode is returned by Commit when called outside
+// a live clip-mode session. The clip-mode panel is the only client
+// authorized to issue a commit (§5.6: commit.text is panel-edited).
+var ErrCommitOnlyValidInClipMode = fmt.Errorf("commit only valid while clip-mode session is open")
+
+// ErrCancelOnlyValidInClipMode mirrors ErrCommitOnlyValidInClipMode
+// for the cancel command.
+var ErrCancelOnlyValidInClipMode = fmt.Errorf("cancel only valid while clip-mode session is open")
+
+func newSession(logger *slog.Logger, typer dispatch.Typer, clipper dispatch.Clipper, cuer audio.Cuer, asrMon *asrMonitor, vad audio.VAD, bus *eventBus, preview previewController, daemonCtx context.Context) *session {
+	s := &session{
 		logger:    logger,
 		typer:     typer,
+		clipper:   clipper,
 		cuer:      cuer,
 		asrMon:    asrMon,
 		vad:       vad,
 		bus:       bus,
+		preview:   preview,
 		daemonCtx: daemonCtx,
 	}
+	if preview != nil {
+		// When the panel exits on its own (after sending commit/cancel,
+		// or after window-close), close the session so state stays in
+		// sync. The handler's commit/cancel path will have already
+		// closed by the time onExit fires in the normal flow; the
+		// idempotent close handles the race.
+		preview.OnExit(func() {
+			_ = s.close(daemonCtx, "panel-exited")
+		})
+	}
+	return s
 }
 
 // Toggle implements the Pause/Scroll Lock semantics: if a session of
@@ -96,8 +122,8 @@ func (s *session) Toggle(ctx context.Context, mode string) error {
 	if err != nil {
 		return err
 	}
-	if target == modeClip {
-		return ErrClipNotImplemented
+	if target == modeClip && (s.preview == nil || s.clipper == nil) {
+		return ErrClipNotConfigured
 	}
 
 	s.mu.Lock()
@@ -130,7 +156,8 @@ func (s *session) Snapshot() (mode string, open bool) {
 
 // open_ transitions the session to (mode, open=true) and fires side
 // effects: bump epoch (so any leftover handler from a prior session
-// is invalidated), reset VAD calibration, play the open chirp.
+// is invalidated), reset VAD calibration, play the open chirp, and
+// for clip-mode spawn the preview subprocess.
 func (s *session) open_(ctx context.Context, mode sessionMode) error {
 	s.mu.Lock()
 	if s.open && s.mode == mode {
@@ -142,6 +169,21 @@ func (s *session) open_(ctx context.Context, mode sessionMode) error {
 	s.open = true
 	epoch := s.epoch
 	s.mu.Unlock()
+
+	if mode == modeClip && s.preview != nil {
+		// Spawn before publishing state and playing cue so a spawn
+		// failure rolls the session back to closed without a confusing
+		// half-open emission.
+		if err := s.preview.Spawn(s.daemonCtx); err != nil {
+			s.mu.Lock()
+			s.epoch++
+			s.mode = modeNone
+			s.open = false
+			s.mu.Unlock()
+			s.logger.Warn("session.open: preview spawn failed", "err", err)
+			return fmt.Errorf("preview spawn: %w", err)
+		}
+	}
 
 	if s.vad != nil {
 		if r, ok := s.vad.(interface{ Reset() }); ok {
@@ -164,6 +206,10 @@ func (s *session) open_(ctx context.Context, mode sessionMode) error {
 // epoch under the lock invalidates every still-pending utterance
 // handler captured by the previous session: when their transcripts
 // arrive they will compare epochs and drop instead of typing.
+//
+// On clip-mode close, the preview subprocess is killed via SIGTERM.
+// Kill is idempotent — if the panel already exited (after sending
+// commit/cancel), the call is a no-op.
 func (s *session) close(ctx context.Context, reason string) error {
 	s.mu.Lock()
 	if !s.open {
@@ -177,6 +223,12 @@ func (s *session) close(ctx context.Context, reason string) error {
 	epoch := s.epoch
 	s.mu.Unlock()
 
+	if prevMode == modeClip && s.preview != nil {
+		if err := s.preview.Kill(); err != nil {
+			s.logger.Warn("session.close: preview kill failed", "err", err)
+		}
+	}
+
 	s.logger.Info("session.close", "previous_mode", prevMode.String(), "reason", reason, "epoch", epoch)
 	s.publishState(modeNone, false)
 
@@ -186,6 +238,47 @@ func (s *session) close(ctx context.Context, reason string) error {
 		}
 	}
 	return nil
+}
+
+// Commit handles the panel's {"cmd":"commit","text":...} message. The
+// text is the panel's edited buffer (authoritative per §5.6) and is
+// sent verbatim to wl-copy. The session closes whether the clipper
+// succeeded or failed — a clipboard failure is surfaced to the panel
+// but doesn't leave clip-mode hanging.
+func (s *session) Commit(ctx context.Context, text string) error {
+	s.mu.Lock()
+	open := s.open
+	mode := s.mode
+	s.mu.Unlock()
+	if !open || mode != modeClip {
+		return ErrCommitOnlyValidInClipMode
+	}
+
+	clipErr := s.clipper.Clip(ctx, text)
+	if clipErr != nil {
+		s.logger.Warn("session.commit: clipper failed", "err", clipErr, "text_len", len(text))
+	} else {
+		s.logger.Info("session.commit", "text_len", len(text))
+	}
+
+	if err := s.close(ctx, "commit"); err != nil {
+		s.logger.Warn("session.commit: close failed", "err", err)
+	}
+	return clipErr
+}
+
+// Cancel handles the panel's {"cmd":"cancel"} message. The buffer is
+// discarded and clip-mode closes without dispatching anything.
+func (s *session) Cancel(ctx context.Context) error {
+	s.mu.Lock()
+	open := s.open
+	mode := s.mode
+	s.mu.Unlock()
+	if !open || mode != modeClip {
+		return ErrCancelOnlyValidInClipMode
+	}
+	s.logger.Info("session.cancel")
+	return s.close(ctx, "cancel")
 }
 
 // publishState emits a session_state event on the bus. Calls without a
