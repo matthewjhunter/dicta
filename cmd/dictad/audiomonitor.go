@@ -25,6 +25,14 @@ type audioMonitor struct {
 	rb  *audio.RingBuffer
 	log *slog.Logger
 
+	// maxUtteranceBytes is the hard cap on a single utterance's
+	// accumulator. When exceeded, loop() force-emits the chunk and
+	// resets the accumulator while keeping inUtterance=true, so a long
+	// speech burst (or a stuck VAD that never declares end-of-utterance)
+	// produces a series of bounded chunks instead of one giant clip.
+	// Zero disables the cap.
+	maxUtteranceBytes int
+
 	// onUtterance is invoked with the speech-region PCM of each completed
 	// utterance, on the audio goroutine. The callback should not block —
 	// the asrMonitor's OnUtterance goroutine-spawns its work.
@@ -56,6 +64,12 @@ func newAudioMonitor(log *slog.Logger, cfg audio.CaptureConfig, vadCfg audio.VAD
 	m.backend.Store("")
 	return m
 }
+
+// SetMaxUtterance sets the hard cap on a single utterance's PCM
+// accumulator. The default of 0 disables the cap. Production callers
+// should set this to a value > 0 — without it, a stuck VAD can
+// accumulate audio indefinitely.
+func (m *audioMonitor) SetMaxUtterance(bytes int) { m.maxUtteranceBytes = bytes }
 
 // Start spawns capture and the VAD-update goroutine. It returns
 // immediately; Stop is required to release the subprocess.
@@ -126,6 +140,20 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 			}
 			if m.onUtterance != nil {
 				accumulator = append(accumulator, f.PCM...)
+				// Force-emit when the accumulator hits the cap so a
+				// stuck VAD (or a genuinely long speech burst) produces
+				// bounded chunks instead of one giant clip. Stay in
+				// utterance: subsequent frames keep accumulating into a
+				// fresh buffer.
+				if m.maxUtteranceBytes > 0 && len(accumulator) >= m.maxUtteranceBytes {
+					utterance := make([]byte, len(accumulator))
+					copy(utterance, accumulator)
+					m.log.Warn("audio.utterance force-split: cap reached",
+						"max_bytes", m.maxUtteranceBytes,
+						"audio_ms", utterance_ms(len(utterance)))
+					m.onUtterance(utterance)
+					accumulator = accumulator[:0]
+				}
 			}
 		} else {
 			m.silenceFrames.Add(1)
@@ -151,6 +179,13 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 // Reset() on session-open (§5.1: "calibrate over the first 500ms of
 // each opened session").
 func (m *audioMonitor) VAD() audio.VAD { return m.vad }
+
+// utterance_ms approximates the audio duration of a PCM byte buffer
+// using the locked D15 frame format (16 kHz mono int16 LE — 32 bytes
+// per ms). Used only for log output; off-by-one is fine.
+func utterance_ms(pcmBytes int) int {
+	return pcmBytes / (audio.SampleRateHz * audio.SampleWidth / 1000)
+}
 
 // Snapshot returns the current AudioStats for inclusion in a status reply.
 func (m *audioMonitor) Snapshot() control.AudioStats {
