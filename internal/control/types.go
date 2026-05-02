@@ -64,6 +64,27 @@ type ASRStats struct {
 	LastError      string `json:"last_error,omitempty"`
 }
 
+// TranscriptData is the payload of a "transcript" event (§5.6). v1 only
+// emits final transcripts (Final = true). Streaming-partial transcripts
+// are reserved for a future ASR backend that supports them; the wire
+// shape is fixed now so the dicta-preview panel can deserialize either
+// form when the time comes.
+type TranscriptData struct {
+	Text        string `json:"text"`
+	Final       bool   `json:"final"`
+	UtteranceID string `json:"utterance_id"`
+	Language    string `json:"language,omitempty"`
+}
+
+// SessionStateData is the payload of a "session_state" event (§5.6). It
+// is published by the daemon every time a session opens or closes,
+// including the implicit close performed during a cross-mode toggle
+// (D6 mutual exclusion).
+type SessionStateData struct {
+	Mode string `json:"mode"` // "type" | "clip" | "none"
+	Open bool   `json:"open"`
+}
+
 // MicInfo describes one audio source in a mic_list response (§5.6).
 type MicInfo struct {
 	Name        string `json:"name"`
