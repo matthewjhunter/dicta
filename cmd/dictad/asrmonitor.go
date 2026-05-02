@@ -111,7 +111,13 @@ func (m *asrMonitor) Stop() {
 // goroutine bounded by cfg.MaxConcurrent. If we're at the cap, the
 // utterance is dropped with a WARN — better than queueing audio that
 // will arrive minutes late.
-func (m *asrMonitor) OnUtterance(pcm []byte) {
+//
+// onTranscript, if non-nil, is invoked with the trimmed transcript text
+// after a successful transcription. It runs on the same goroutine as
+// the Transcribe call, so a slow handler will hold an inflight slot —
+// keep it cheap (the production path hands off to a Typer.Type that
+// internally chunks and sleeps).
+func (m *asrMonitor) OnUtterance(pcm []byte, onTranscript func(text string)) {
 	if len(pcm) == 0 {
 		return
 	}
@@ -121,10 +127,10 @@ func (m *asrMonitor) OnUtterance(pcm []byte) {
 		m.logger.Warn("asr.utterance dropped: at concurrency cap", "max", m.cfg.MaxConcurrent)
 		return
 	}
-	go m.transcribe(pcm)
+	go m.transcribe(pcm, onTranscript)
 }
 
-func (m *asrMonitor) transcribe(pcm []byte) {
+func (m *asrMonitor) transcribe(pcm []byte, onTranscript func(text string)) {
 	defer func() { <-m.inflight }()
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.TranscribeTimeout)
 	defer cancel()
@@ -148,6 +154,9 @@ func (m *asrMonitor) transcribe(pcm []byte) {
 		"language", tr.Language,
 		"audio_ms", int(time.Duration(len(pcm))/time.Duration(2*16)),
 		"duration_ms", dur.Milliseconds())
+	if onTranscript != nil && text != "" {
+		onTranscript(text)
+	}
 }
 
 // healthLoop polls Healthy on cfg.HealthInterval and updates the

@@ -60,7 +60,7 @@ func TestASRMonitor_OnUtteranceTranscribesAndCounts(t *testing.T) {
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
-	m.OnUtterance(make([]byte, 1280))
+	m.OnUtterance(make([]byte, 1280), nil)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -84,8 +84,8 @@ func TestASRMonitor_DropsEmptyUtterance(t *testing.T) {
 		BackendName:    "fake",
 		HealthInterval: time.Hour,
 	})
-	m.OnUtterance(nil)
-	m.OnUtterance([]byte{})
+	m.OnUtterance(nil, nil)
+	m.OnUtterance([]byte{}, nil)
 	time.Sleep(20 * time.Millisecond)
 	if got := f.transcribeCall.Load(); got != 0 {
 		t.Errorf("expected no Transcribe calls, got %d", got)
@@ -100,7 +100,7 @@ func TestASRMonitor_RecordsTranscribeError(t *testing.T) {
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     1,
 	})
-	m.OnUtterance(make([]byte, 1280))
+	m.OnUtterance(make([]byte, 1280), nil)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -127,8 +127,8 @@ func TestASRMonitor_DropsAtConcurrencyCap(t *testing.T) {
 	})
 
 	// Submit two utterances back-to-back. The second must be dropped.
-	m.OnUtterance(make([]byte, 1280))
-	m.OnUtterance(make([]byte, 1280))
+	m.OnUtterance(make([]byte, 1280), nil)
+	m.OnUtterance(make([]byte, 1280), nil)
 
 	time.Sleep(200 * time.Millisecond)
 	if got := f.transcribeCall.Load(); got != 1 {
