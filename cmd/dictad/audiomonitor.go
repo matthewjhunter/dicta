@@ -147,6 +147,11 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 	}
 }
 
+// VAD returns the underlying audio.VAD so the orchestrator can call
+// Reset() on session-open (§5.1: "calibrate over the first 500ms of
+// each opened session").
+func (m *audioMonitor) VAD() audio.VAD { return m.vad }
+
 // Snapshot returns the current AudioStats for inclusion in a status reply.
 func (m *audioMonitor) Snapshot() control.AudioStats {
 	state := "silence"

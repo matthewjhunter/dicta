@@ -46,7 +46,7 @@ func TestEndToEnd_AudioToASR(t *testing.T) {
 	audioMon := newAudioMonitor(discardLogger(),
 		audio.CaptureConfig{Backend: audio.BackendPipeWire},
 		audio.VADConfig{Calibrate: 100 * time.Millisecond})
-	audioMon.onUtterance = asrMon.OnUtterance
+	audioMon.onUtterance = func(pcm []byte) { asrMon.OnUtterance(pcm, nil) }
 
 	if err := audioMon.Start(t.Context()); err != nil {
 		t.Fatalf("audio.Start: %v", err)
@@ -71,6 +71,76 @@ func TestEndToEnd_AudioToASR(t *testing.T) {
 	}
 	if audioSnap.SpeechFrames == 0 {
 		t.Errorf("audio.SpeechFrames: got 0; expected VAD detection")
+	}
+}
+
+// TestEndToEnd_TypeModeSession layers the phase-7 session orchestrator
+// on top of the audio→VAD→ASR pipeline: open type-mode, feed an
+// utterance, verify the fake typer received the transcript, then close
+// the session and verify the open/close cues fired.
+func TestEndToEnd_TypeModeSession(t *testing.T) {
+	dir := t.TempDir()
+	pcmPath := filepath.Join(dir, "clip.pcm")
+	if err := writeUtterancePCM(pcmPath); err != nil {
+		t.Fatal(err)
+	}
+	stub := filepath.Join(dir, "pw-record")
+	script := "#!/bin/sh\n" +
+		"exec dd if=" + pcmPath + " bs=2560 2>/dev/null | while dd bs=2560 count=1 2>/dev/null; do sleep 0.05; done\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+
+	fake := &fakeASR{transcript: asrclient.Transcript{Text: "captured speech", Language: "en"}}
+	asrMon := newASRMonitor(discardLogger(), fake, asrMonitorConfig{
+		BackendName:       "fake",
+		HealthInterval:    time.Hour,
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     2,
+	})
+
+	audioMon := newAudioMonitor(discardLogger(),
+		audio.CaptureConfig{Backend: audio.BackendPipeWire},
+		audio.VADConfig{Calibrate: 100 * time.Millisecond})
+
+	typer := &fakeTyper{}
+	cuer := &fakeCuer{}
+	sess := newSession(discardLogger(), typer, cuer, asrMon, audioMon.VAD(), t.Context())
+	audioMon.onUtterance = sess.OnUtterance
+
+	if err := sess.Toggle(t.Context(), "type"); err != nil {
+		t.Fatalf("Toggle open: %v", err)
+	}
+
+	if err := audioMon.Start(t.Context()); err != nil {
+		t.Fatalf("audio.Start: %v", err)
+	}
+	defer audioMon.Stop()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(typer.Calls()) >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	calls := typer.Calls()
+	if len(calls) == 0 {
+		t.Fatalf("expected at least 1 type call; audio=%+v asr=%+v",
+			audioMon.Snapshot(), asrMon.Snapshot())
+	}
+	if calls[0] != "captured speech" {
+		t.Errorf("type call: got %q want %q", calls[0], "captured speech")
+	}
+
+	if err := sess.Toggle(t.Context(), "type"); err != nil {
+		t.Fatalf("Toggle close: %v", err)
+	}
+	played := cuer.Played()
+	if len(played) != 2 || played[0] != audio.CueOpen || played[1] != audio.CueClose {
+		t.Errorf("cues: got %v want [open, close]", played)
 	}
 }
 

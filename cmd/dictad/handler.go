@@ -6,18 +6,18 @@ import (
 	"github.com/matthewjhunter/dicta/internal/control"
 )
 
-// stubHandler is the phase-1 daemon handler: status returns plausible
-// placeholder data; everything else returns ErrNotImplemented. As phases
-// land, this is replaced by the real orchestrator state machine.
+// stubHandler is the daemon's control-socket handler. As phases land,
+// fields are populated and methods light up.
 //
 // Phase 3 adds the optional audioMonitor reference for the dev-mode
-// `--audio-monitor` flag — when set, status includes live AudioStats.
-// Phase 4 adds the optional asrMonitor reference for ASR health and
-// transcribe activity.
+// `--audio-monitor` flag. Phase 4 adds the optional asrMonitor.
+// Phase 7 adds the session orchestrator: ToggleTalk forwards here,
+// and Status reflects live mode/open state.
 type stubHandler struct {
 	version string
 	audio   *audioMonitor
 	asr     *asrMonitor
+	session *session
 }
 
 func (h *stubHandler) Status(ctx context.Context) (control.StatusInfo, error) {
@@ -25,6 +25,9 @@ func (h *stubHandler) Status(ctx context.Context) (control.StatusInfo, error) {
 		Version:     h.version,
 		SessionMode: "none",
 		SessionOpen: false,
+	}
+	if h.session != nil {
+		info.SessionMode, info.SessionOpen = h.session.Snapshot()
 	}
 	if h.audio != nil {
 		info.Audio = h.audio.Snapshot()
@@ -36,7 +39,10 @@ func (h *stubHandler) Status(ctx context.Context) (control.StatusInfo, error) {
 }
 
 func (h *stubHandler) ToggleTalk(ctx context.Context, mode string) error {
-	return control.ErrNotImplemented
+	if h.session == nil {
+		return control.ErrNotImplemented
+	}
+	return h.session.Toggle(ctx, mode)
 }
 
 func (h *stubHandler) Commit(ctx context.Context, text string) error {

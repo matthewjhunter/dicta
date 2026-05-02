@@ -21,6 +21,7 @@ import (
 	"github.com/matthewjhunter/dicta/internal/asr"
 	"github.com/matthewjhunter/dicta/internal/audio"
 	"github.com/matthewjhunter/dicta/internal/control"
+	"github.com/matthewjhunter/dicta/internal/dispatch"
 	"github.com/matthewjhunter/dicta/internal/whispersup"
 )
 
@@ -41,6 +42,11 @@ func main() {
 	openaiEndpointFlag := flag.String("asr-openai-endpoint", "", "openai transcription endpoint URL (empty = asrclient default)")
 	openaiModelFlag := flag.String("asr-openai-model", "", "openai transcription model name (empty = asrclient default)")
 	openaiSkipVerifyFlag := flag.Bool("asr-openai-tls-skip-verify", false, "DANGEROUS: skip TLS certificate verification on the openai endpoint (testing only)")
+	ydotoolBinaryFlag := flag.String("ydotool-binary", "/usr/bin/ydotool", "ydotool binary path (must be on the allowlist)")
+	ydotoolSocketFlag := flag.String("ydotool-socket", "", "ydotoold socket path (empty = let ydotool pick its default)")
+	typeChunkSizeFlag := flag.Int("type-chunk-size", 200, "ydotool dispatch chunk size in characters")
+	typeChunkDelayFlag := flag.Duration("type-chunk-delay", 20*time.Millisecond, "delay between ydotool chunks")
+	audioCuesFlag := flag.Bool("audio-cues", true, "play short tones on session open/close")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -126,10 +132,36 @@ func main() {
 		defer backend.Close()
 		handler.asr = asrMon
 
-		if audioMon != nil {
-			audioMon.onUtterance = asrMon.OnUtterance
-		}
 		logger.Info("asr-monitor started", "backend", *asrBackendFlag)
+	}
+
+	// Type-mode session orchestrator (phase 7). Requires both audio
+	// capture and an ASR backend; without either, ToggleTalk replies
+	// not_implemented and the daemon stays useful only for status.
+	var sess *session
+	if audioMon != nil && handler.asr != nil {
+		typer, err := dispatch.NewSubprocessTyper(dispatch.TyperConfig{
+			Binary:     *ydotoolBinaryFlag,
+			Socket:     *ydotoolSocketFlag,
+			ChunkSize:  *typeChunkSizeFlag,
+			ChunkDelay: *typeChunkDelayFlag,
+			Logger:     logger,
+		})
+		if err != nil {
+			logger.Error("dispatch.typer", "err", err)
+			os.Exit(1)
+		}
+		var cuer audio.Cuer = audio.NewSubprocessCuer(audio.CueConfig{
+			Disabled: !*audioCuesFlag,
+		})
+		sess = newSession(logger, typer, cuer, handler.asr, audioMon.VAD(), ctx)
+		audioMon.onUtterance = sess.OnUtterance
+		handler.session = sess
+		logger.Info("session orchestrator ready", "ydotool", *ydotoolBinaryFlag, "audio_cues", *audioCuesFlag)
+	} else if audioMon != nil {
+		// Audio without ASR: keep utterance counting alive, but no
+		// dispatch path is available.
+		audioMon.onUtterance = func(pcm []byte) { _ = pcm }
 	}
 
 	if audioMon != nil {
