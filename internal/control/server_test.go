@@ -170,7 +170,7 @@ func readEvent(t *testing.T, br *bufio.Reader) Event {
 }
 
 func TestStatusRoundTrip(t *testing.T) {
-	h := &fakeHandler{statusInfo: StatusInfo{Version: "test", SessionMode: "none", Backend: "wyoming", BackendHealth: "unknown"}}
+	h := &fakeHandler{statusInfo: StatusInfo{Version: "test", SessionMode: "none"}}
 	sock, stop := startServer(t, h)
 	defer stop()
 
@@ -190,8 +190,8 @@ func TestStatusRoundTrip(t *testing.T) {
 	if data["version"] != "test" {
 		t.Errorf("version: got %v", data["version"])
 	}
-	if data["backend"] != "wyoming" {
-		t.Errorf("backend: got %v", data["backend"])
+	if data["session_mode"] != "none" {
+		t.Errorf("session_mode: got %v", data["session_mode"])
 	}
 }
 

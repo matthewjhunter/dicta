@@ -32,12 +32,11 @@ type Event struct {
 
 // StatusInfo is the payload of a successful status response.
 type StatusInfo struct {
-	Version       string     `json:"version"`
-	SessionMode   string     `json:"session_mode"`
-	SessionOpen   bool       `json:"session_open"`
-	Backend       string     `json:"backend"`
-	BackendHealth string     `json:"backend_health"`
-	Audio         AudioStats `json:"audio,omitzero"`
+	Version     string     `json:"version"`
+	SessionMode string     `json:"session_mode"`
+	SessionOpen bool       `json:"session_open"`
+	Audio       AudioStats `json:"audio,omitzero"`
+	ASR         ASRStats   `json:"asr,omitzero"`
 }
 
 // AudioStats reports observability counters for the capture pipeline. Used
@@ -51,6 +50,18 @@ type AudioStats struct {
 	SilenceFrames uint64 `json:"silence_frames"`
 	LastVADState  string `json:"last_vad_state,omitempty"` // "speech" | "silence"
 	NoiseFloor    string `json:"noise_floor,omitempty"`    // formatted RMS for human reading
+}
+
+// ASRStats reports backend health and recent transcribe activity for
+// `dicta status`. Populated when the daemon was started with an ASR
+// backend configured (phases 4–6).
+type ASRStats struct {
+	Backend        string `json:"backend,omitempty"`
+	Health         string `json:"health,omitempty"` // "healthy" | "unhealthy" | "unknown"
+	LastHealthErr  string `json:"last_health_error,omitempty"`
+	Transcripts    uint64 `json:"transcripts"`
+	LastTranscript string `json:"last_transcript,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
 }
 
 // MicInfo describes one audio source in a mic_list response (§5.6).

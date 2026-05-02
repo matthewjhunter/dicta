@@ -25,6 +25,11 @@ type audioMonitor struct {
 	rb  *audio.RingBuffer
 	log *slog.Logger
 
+	// onUtterance is invoked with the speech-region PCM of each completed
+	// utterance, on the audio goroutine. The callback should not block —
+	// the asrMonitor's OnUtterance goroutine-spawns its work.
+	onUtterance func(pcm []byte)
+
 	// stats — atomic to keep the read in Snapshot() lock-free. EnergyVAD
 	// itself is documented as single-goroutine, so noiseFloor is mirrored
 	// out from inside loop() rather than read directly.
@@ -102,6 +107,12 @@ func (m *audioMonitor) Stop() error {
 func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 	defer close(m.doneSignal)
 	energyVAD, _ := m.vad.(*audio.EnergyVAD)
+
+	var (
+		inUtterance bool
+		accumulator []byte
+	)
+
 	for f := range frames {
 		m.rb.Push(f)
 		m.frames.Add(1)
@@ -109,8 +120,26 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 		m.lastSpeech.Store(speech)
 		if speech {
 			m.speechFrames.Add(1)
+			if !inUtterance {
+				inUtterance = true
+				accumulator = accumulator[:0]
+			}
+			if m.onUtterance != nil {
+				accumulator = append(accumulator, f.PCM...)
+			}
 		} else {
 			m.silenceFrames.Add(1)
+			if inUtterance {
+				inUtterance = false
+				if m.onUtterance != nil && len(accumulator) > 0 {
+					// Hand off a copy — the next utterance reuses the
+					// accumulator's backing array.
+					utterance := make([]byte, len(accumulator))
+					copy(utterance, accumulator)
+					m.onUtterance(utterance)
+				}
+				accumulator = accumulator[:0]
+			}
 		}
 		if energyVAD != nil {
 			m.noiseFloor.Store(math.Float64bits(energyVAD.NoiseFloor()))

@@ -12,21 +12,25 @@ import (
 //
 // Phase 3 adds the optional audioMonitor reference for the dev-mode
 // `--audio-monitor` flag — when set, status includes live AudioStats.
+// Phase 4 adds the optional asrMonitor reference for ASR health and
+// transcribe activity.
 type stubHandler struct {
 	version string
 	audio   *audioMonitor
+	asr     *asrMonitor
 }
 
 func (h *stubHandler) Status(ctx context.Context) (control.StatusInfo, error) {
 	info := control.StatusInfo{
-		Version:       h.version,
-		SessionMode:   "none",
-		SessionOpen:   false,
-		Backend:       "wyoming",
-		BackendHealth: "unknown",
+		Version:     h.version,
+		SessionMode: "none",
+		SessionOpen: false,
 	}
 	if h.audio != nil {
 		info.Audio = h.audio.Snapshot()
+	}
+	if h.asr != nil {
+		info.ASR = h.asr.Snapshot()
 	}
 	return info, nil
 }

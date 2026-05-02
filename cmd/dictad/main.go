@@ -16,7 +16,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/matthewjhunter/dicta/internal/asr"
 	"github.com/matthewjhunter/dicta/internal/audio"
 	"github.com/matthewjhunter/dicta/internal/control"
 )
@@ -28,6 +30,8 @@ func main() {
 	audioMonitorFlag := flag.Bool("audio-monitor", false, "phase-3 dev mode: continuously capture audio and expose VAD stats via `dicta status`")
 	audioBackendFlag := flag.String("audio-backend", "auto", "audio capture backend: pipewire | pulse | auto")
 	audioDeviceFlag := flag.String("audio-device", "", "audio source name (PipeWire node or pulse source); empty = system default")
+	asrBackendFlag := flag.String("asr-backend", "", "asr backend: wyoming | whispercpp | openai (empty = disabled)")
+	asrAddrFlag := flag.String("asr-wyoming-addr", "tcp://localhost:10300", "wyoming server address (host:port or tcp://host:port)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -48,18 +52,47 @@ func main() {
 
 	handler := &stubHandler{version: version}
 
+	var audioMon *audioMonitor
 	if *audioMonitorFlag {
-		mon := newAudioMonitor(logger, audio.CaptureConfig{
+		audioMon = newAudioMonitor(logger, audio.CaptureConfig{
 			Backend: audio.CaptureBackend(*audioBackendFlag),
 			Device:  *audioDeviceFlag,
 		}, audio.VADConfig{})
-		if err := mon.Start(ctx); err != nil {
+	}
+
+	if *asrBackendFlag != "" {
+		backend, err := asr.Select(asr.Config{
+			Backend: *asrBackendFlag,
+			Wyoming: asr.WyomingConfig{Addr: *asrAddrFlag},
+		})
+		if err != nil {
+			logger.Error("asr.select", "err", err, "backend", *asrBackendFlag)
+			os.Exit(1)
+		}
+		asrMon := newASRMonitor(logger, backend, asrMonitorConfig{
+			BackendName:       *asrBackendFlag,
+			HealthInterval:    10 * time.Second,
+			TranscribeTimeout: 30 * time.Second,
+		})
+		asrMon.Start(ctx)
+		defer asrMon.Stop()
+		defer backend.Close()
+		handler.asr = asrMon
+
+		if audioMon != nil {
+			audioMon.onUtterance = asrMon.OnUtterance
+		}
+		logger.Info("asr-monitor started", "backend", *asrBackendFlag, "addr", *asrAddrFlag)
+	}
+
+	if audioMon != nil {
+		if err := audioMon.Start(ctx); err != nil {
 			logger.Error("audio.start", "err", err)
 			os.Exit(1)
 		}
-		defer mon.Stop()
-		handler.audio = mon
-		logger.Info("audio-monitor started", "backend", mon.Snapshot().Backend)
+		defer audioMon.Stop()
+		handler.audio = audioMon
+		logger.Info("audio-monitor started", "backend", audioMon.Snapshot().Backend)
 	}
 
 	srv, err := control.Listen(socketPath, handler, func(format string, args ...any) {
