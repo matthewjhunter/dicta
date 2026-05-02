@@ -22,6 +22,10 @@ tasks:
     desc: Build dictad and dicta (pure Go, static).
     deps: [dictad, dicta]
 
+  build:all:
+    desc: Build dictad, dicta, AND dicta-preview (preview needs CGo + Wayland/GLES dev headers).
+    deps: [build, preview]
+
   dictad:
     desc: Build the dictad daemon.
     cmds:
@@ -47,6 +51,26 @@ tasks:
       - go.sum
     generates:
       - '{{.BIN}}/dicta'
+
+  preview:
+    desc: |
+      Build the clip-mode preview panel (CGo + Wayland/xkbcommon/GLES/EGL/
+      libvulkan headers required at build time). The nox11 tag drops the
+      X11 backend so libxkbcommon-x11 and libxcb-* aren't needed.
+      D13's pure-Go invariant does NOT apply to dicta-preview (it's a
+      separate process boundary; see SECURITY.md item 6).
+    env:
+      CGO_ENABLED: '1'
+    cmds:
+      - mkdir -p {{.BIN}}
+      - go build -tags nox11 -ldflags='{{.LDFLAGS}}' -o {{.BIN}}/dicta-preview ./cmd/dicta-preview
+    sources:
+      - cmd/dicta-preview/**/*.go
+      - proto/**/*.go
+      - go.mod
+      - go.sum
+    generates:
+      - '{{.BIN}}/dicta-preview'
 
   test:
     desc: Run unit tests.
@@ -81,3 +105,18 @@ tasks:
       - task: vet
       - task: test
       - task: test:race
+
+  install:user:
+    desc: |
+      Install dictad + dicta + dicta-preview into ~/.local/bin and the
+      systemd user unit into ~/.config/systemd/user. Run `task build:all`
+      first. Does NOT enable the unit — run `systemctl --user enable
+      --now dictad.service` separately.
+    cmds:
+      - install -d ~/.local/bin
+      - install -m 0755 {{.BIN}}/dictad ~/.local/bin/dictad
+      - install -m 0755 {{.BIN}}/dicta ~/.local/bin/dicta
+      - install -m 0755 {{.BIN}}/dicta-preview ~/.local/bin/dicta-preview
+      - install -d ~/.config/systemd/user
+      - install -m 0644 packaging/systemd/dictad.service ~/.config/systemd/user/dictad.service
+      - systemctl --user daemon-reload
