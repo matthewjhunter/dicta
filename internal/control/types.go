@@ -32,11 +32,25 @@ type Event struct {
 
 // StatusInfo is the payload of a successful status response.
 type StatusInfo struct {
-	Version       string `json:"version"`
-	SessionMode   string `json:"session_mode"`
-	SessionOpen   bool   `json:"session_open"`
-	Backend       string `json:"backend"`
-	BackendHealth string `json:"backend_health"`
+	Version       string     `json:"version"`
+	SessionMode   string     `json:"session_mode"`
+	SessionOpen   bool       `json:"session_open"`
+	Backend       string     `json:"backend"`
+	BackendHealth string     `json:"backend_health"`
+	Audio         AudioStats `json:"audio,omitzero"`
+}
+
+// AudioStats reports observability counters for the capture pipeline. Used
+// by `dicta status` for the phase-3 manual-test deliverable; later phases
+// keep these populated whenever a session is active.
+type AudioStats struct {
+	Running       bool   `json:"running"`
+	Backend       string `json:"backend,omitempty"`
+	Frames        uint64 `json:"frames"`
+	SpeechFrames  uint64 `json:"speech_frames"`
+	SilenceFrames uint64 `json:"silence_frames"`
+	LastVADState  string `json:"last_vad_state,omitempty"` // "speech" | "silence"
+	NoiseFloor    string `json:"noise_floor,omitempty"`    // formatted RMS for human reading
 }
 
 // MicInfo describes one audio source in a mic_list response (§5.6).

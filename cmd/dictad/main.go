@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/matthewjhunter/dicta/internal/audio"
 	"github.com/matthewjhunter/dicta/internal/control"
 )
 
@@ -24,6 +25,9 @@ const version = "0.1.0-dev"
 
 func main() {
 	socketFlag := flag.String("socket", "", "control socket path (default: $XDG_RUNTIME_DIR/dicta.sock)")
+	audioMonitorFlag := flag.Bool("audio-monitor", false, "phase-3 dev mode: continuously capture audio and expose VAD stats via `dicta status`")
+	audioBackendFlag := flag.String("audio-backend", "auto", "audio capture backend: pipewire | pulse | auto")
+	audioDeviceFlag := flag.String("audio-device", "", "audio source name (PipeWire node or pulse source); empty = system default")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -39,7 +43,26 @@ func main() {
 		socketPath = p
 	}
 
-	srv, err := control.Listen(socketPath, &stubHandler{version: version}, func(format string, args ...any) {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	handler := &stubHandler{version: version}
+
+	if *audioMonitorFlag {
+		mon := newAudioMonitor(logger, audio.CaptureConfig{
+			Backend: audio.CaptureBackend(*audioBackendFlag),
+			Device:  *audioDeviceFlag,
+		}, audio.VADConfig{})
+		if err := mon.Start(ctx); err != nil {
+			logger.Error("audio.start", "err", err)
+			os.Exit(1)
+		}
+		defer mon.Stop()
+		handler.audio = mon
+		logger.Info("audio-monitor started", "backend", mon.Snapshot().Backend)
+	}
+
+	srv, err := control.Listen(socketPath, handler, func(format string, args ...any) {
 		logger.Warn("control", "msg", fmt.Sprintf(format, args...))
 	})
 	if err != nil {
@@ -48,10 +71,7 @@ func main() {
 	}
 	defer srv.Close()
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	logger.Info("dictad started", "version", version, "socket", socketPath)
+	logger.Info("dictad started", "version", version, "socket", socketPath, "audio_monitor", *audioMonitorFlag)
 
 	if err := srv.Serve(ctx); err != nil {
 		logger.Error("serve", "err", err)
