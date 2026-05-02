@@ -51,17 +51,19 @@ dictation."*
 - Wakeword / continuous listen. Deferred to v2 as a separate sidecar; see
   5.3.
 - Source dependency on `majordomo`. That project is on hiatus; `dicta`
-  must not import or vendor it. Wherever conceptual overlap exists
-  (Wyoming wire protocol, `IsQuiet` PCM helper, mic-cue tones), `dicta`
-  writes a fresh implementation in-tree. See D16.
+  must not import or vendor it. The Wyoming wire protocol and OpenAI-
+  compatible HTTP transcription clients live in a separate
+  `github.com/matthewjhunter/asrclient` module that `dicta` imports;
+  the `IsQuiet` PCM helper and mic-cue tones are reimplemented fresh
+  in-tree under `internal/audio`. See D16.
 
 ## 3. Constraints and decisions (locked)
 
 | ID  | Decision | Rationale |
 |-----|----------|-----------|
 | D1  | Audio capture: spawn `pw-record` (PipeWire) or `parec` (PulseAudio compat) as subprocess | Avoids CGo/PipeWire binding complexity; robust; PipeWire is the daily-driver baseline on modern Ubuntu |
-| D2  | ASR backend: pluggable via Go interface. Three impls in v1: `wyoming` (default; TCP to a Wyoming-protocol STT server such as `wyoming-faster-whisper`), `whispercpp` (daemon-managed `whisper-server` subprocess, loopback HTTP), `openai` (user-managed OpenAI-protocol HTTP endpoint). | Wyoming is the lingua franca of the local-voice-AI ecosystem; defaulting to it lets `dicta` share an STT server with anything else on the network that speaks Wyoming. `whispercpp` is the standalone option for users without a Wyoming setup; `openai` is for cloud/remote. All three avoid CGo and Python in our binary. |
-| D3  | Wakeword: deferred to v2. v2 ships two modes -- `wyoming` (default, pure Go, TCP to a Wyoming wakeword server such as `wyoming-openwakeword`) and `embedded` (build-tagged `onnx`, CGo via `yalue/onnxruntime_go`, openWakeWord pipeline). Default builds remain pure Go. | Pure-Go default keeps D13 intact; the embedded path is opt-in for users who want a single binary. The embedded implementation is *reimplemented*, not vendored -- see D16. |
+| D2  | ASR backend: pluggable via the `asrclient.Backend` interface from `github.com/matthewjhunter/asrclient`. Three impls in v1, all selected by config: `wyoming` (default; `asrclient/wyoming.Client` to a Wyoming-protocol STT server such as `wyoming-faster-whisper`), `whispercpp` (`asrclient/whispercpp.Client` to a daemon-supervised `whisper-server` subprocess on loopback), `openai` (`asrclient/openai.Client` to a user-managed OpenAI-protocol HTTP endpoint). The whisper-server *lifecycle* (spawn, port discovery, restart-on-crash, /health gating) lives in `dicta`; the `asrclient/whispercpp` client is just HTTP. | Wyoming is the lingua franca of the local-voice-AI ecosystem; defaulting to it lets `dicta` share an STT server with anything else on the network that speaks Wyoming. `whispercpp` is the standalone option for users without a Wyoming setup; `openai` is for cloud/remote. Protocol code lives in `asrclient` (reusable, single API for all three); subprocess supervision is dicta-specific (configuration, logging, fault recovery integrated with the rest of the daemon). All three avoid CGo and Python. |
+| D3  | Wakeword: deferred to v2. v2 ships two modes -- `wyoming` (default, pure Go, TCP to a Wyoming wakeword server such as `wyoming-openwakeword`, reusing the `asrclient/wyoming` low-level wire surface) and `embedded` (build-tagged `onnx`, CGo via `yalue/onnxruntime_go`, openWakeWord pipeline). Default builds remain pure Go. | Pure-Go default keeps D13 intact; the embedded path is opt-in for users who want a single binary. The embedded implementation is *reimplemented*, not vendored -- see D16. |
 | D4  | LLM cleanup: OpenAI-protocol HTTP client, configurable endpoint, no default URL | Works with `olla`, `llama.cpp` server, vLLM, Anthropic-compatible gateways, OpenAI itself |
 | D5  | Activation is compositor-bound single-key shortcuts only: **Pause** for type-mode, **Scroll Lock** for clip-mode. No PTT in v1: no evdev sidecar, no `input` group requirement, no second systemd unit. | PTT requires hold-and-release semantics that compositor shortcuts can't deliver, which would force an evdev sidecar. It also costs more keystrokes than tap-toggle, which contradicts the owner's ergonomic constraint (D17). Pause+VAD provides the same controlled-session-with-per-utterance-commit shape with lower keystroke load. |
 | D6  | Mode arbitration: type-mode and clip-mode are mutually exclusive. Activating one while the other is active first closes the active mode, then opens the new one. | Avoids ambiguous output routing; matches "one mic, one destination at a time." |
@@ -74,7 +76,7 @@ dictation."*
 | D13 | The daemon (`dictad`) and CLI (`dicta`) are pure Go, no CGo, no Python -- `CGO_ENABLED=0`, fully static. The `dicta-preview` sidecar is allowed to use any UI toolkit (GTK4, Qt, gioui, etc.) since it is a separate binary on a separate process boundary; the daemon's static-binary and `MemoryDenyWriteExecute` properties are unaffected. | Single static-binary distribution for the security-relevant components; no Python supply chain in the audio/ASR/dispatch path; smaller attack surface for the long-running daemon. The preview panel is short-lived and user-launched. |
 | D14 | Audio capture: `pw-record`/`parec` subprocess in v1 (honors D13). A build-tagged PortAudio backend (`gordonklaus/portaudio`) is reserved as a v2 escape hatch if subprocess proves flaky in practice. | Subprocess loses some determinism (chunk timing, cleaner device enumeration) but keeps the daemon pure Go. The `internal/audio.Capture` interface is shaped so a PortAudio impl can be added later without touching call sites. |
 | D15 | Audio constants locked: 16 kHz, mono, int16 little-endian, 80 ms / 1280-sample chunks. | Standard across the local-voice-AI ecosystem; what Wyoming STT/wake servers expect; what openWakeWord models consume. Lets a future `internal/wake` consume `dicta` audio buffers with no resampling or re-chunking. |
-| D16 | No source dependency on `majordomo` (project on hiatus). All shared concepts are written fresh in-tree under `internal/`: Wyoming protocol in `internal/wyoming`, `IsQuiet` and mic-cue tones in `internal/audio`. No `replace` directive, no `git submodule`, no in-tree vendor of `majordomo` source. The `internal/wyoming` package keeps zero `dicta`-specific imports so it can be promoted to a standalone module later if a second consumer appears. | Avoids tying `dicta`'s build to a paused project. Defers the cost of standalone-module ceremony until a second consumer actually exists. |
+| D16 | No source dependency on `majordomo` (project on hiatus). The Wyoming wire protocol and the OpenAI-compatible HTTP transcription clients live in a separate `github.com/matthewjhunter/asrclient` module that `dicta` imports; subprocess lifecycle (whisper-server) stays in `dicta`. PCM-format helpers (`IsQuiet`, mic-cue tones) are reimplemented fresh in-tree under `internal/audio`. No `replace` directive against `majordomo`, no `git submodule`, no in-tree vendor of `majordomo` source. | Avoids tying `dicta`'s build to a paused project. Splits protocol from lifecycle so the protocol surface is reusable; `asrclient` is shaped to be the single Backend API for any future voice consumer (including `majordomo` if it un-pauses). |
 | D17 | Hotkey defaults and recommendations are single-key only. v1 default bindings: **Pause** for type-mode toggle, **Scroll Lock** for clip-mode toggle. No modifier-chord bindings in shipped examples, default config, or documentation. Users may still bind chords on their own; `dicta` itself does not constrain compositor bindings. | Owner ergonomic constraint: multi-key chords are physically costly. Pause and Scroll Lock are vestigial keys on modern keyboards, almost never collide with other bindings, and a tap is the lowest possible keystroke load. |
 
 ## 4. Architecture overview
@@ -89,10 +91,12 @@ dictation."*
        │                  │               │                  │                  │
        ▼                  ▼               ▼                  ▼                  ▼
 ┌──────────────┐   ┌──────────────┐  ┌──────────────┐  ┌────────────────┐ ┌──────────────┐
-│  Unix socket │   │  Audio capt. │  │  ASR clients:│  │  LLM cleanup   │ │ dicta-preview│
-│  control API │   │  (pw-record) │  │  - wyoming   │  │  (OpenAI HTTP) │ │  (sidecar)   │
-│  + event sub │   │  16k/mono/   │  │  - whispercpp│  │                │ │  GUI panel   │
-│              │   │  S16LE/80ms  │  │  - openai    │  │                │ │  for clip    │
+│  Unix socket │   │  Audio capt. │  │  asrclient   │  │  LLM cleanup   │ │ dicta-preview│
+│  control API │   │  (pw-record) │  │  (external   │  │  (OpenAI HTTP) │ │  (sidecar)   │
+│  + event sub │   │  16k/mono/   │  │   module):   │  │                │ │  GUI panel   │
+│              │   │  S16LE/80ms  │  │ wyoming/     │  │                │ │  for clip    │
+│              │   │              │  │ whispercpp/  │  │                │ │              │
+│              │   │              │  │ openai       │  │                │ │              │
 └──────┬───────┘   └──────┬───────┘  └──────┬───────┘  └──────┬─────────┘ └──────┬───────┘
        │                  │                 │                 │                  │
        └──────────────────┴────────┬────────┴─────────────────┴──────────────────┘
@@ -131,8 +135,9 @@ The following packages must NOT import each other:
 
 ```
 internal/audio       capture, VAD, ringbuffer, mic-cue tones, IsQuiet
-internal/asr         backend interface + impls (wyoming, whispercpp, openai)
-internal/wyoming     Wyoming wire protocol (in-tree per D16; promotion-ready)
+internal/asr         thin selector: reads config, returns an asrclient.Backend
+internal/whispersup  supervises the local whisper-server subprocess
+                     (only used when [asr] backend = "whispercpp")
 internal/cleanup     LLM cleanup client (OpenAI-protocol)
 internal/dispatch    ydotool + wl-copy + notify-send wrappers (no policy)
 internal/control     Unix socket server: command protocol + event subscriptions
@@ -144,6 +149,14 @@ internal/audit       JSONL + WAV writer
 
 Cross-cutting (allowed everywhere): `internal/log`, `internal/errors`.
 
+The Wyoming wire protocol and OpenAI-compatible HTTP transcription
+clients live OUTSIDE this repository in
+`github.com/matthewjhunter/asrclient` and are imported as a normal Go
+module dependency (D16). dicta's `internal/asr` is a thin selector that
+reads `[asr] backend = ...` and returns an `asrclient.Backend`;
+`internal/whispersup` exists only to spawn and watch the local
+`whisper-server` subprocess when the whispercpp backend is configured.
+
 The mode state machine (open/close type session, spawn/kill preview panel,
 route transcripts to ydotool vs. clipboard, enforce D6 mutual exclusion)
 lives in `cmd/dictad/main.go`. The orchestrator is the *only* place that
@@ -151,11 +164,8 @@ imports multiple internal packages.
 
 `cmd/dicta-preview/` is a sibling binary in the same Go module. It connects
 to `dictad` only via the control socket and does NOT import any
-`internal/` package -- the socket protocol is its only API surface.
-
-The Wyoming client at `internal/wyoming` is written with zero
-`dicta`-specific imports so it can be lifted into a standalone module
-later if a second consumer appears (D16).
+`internal/` package or `asrclient` -- the socket protocol is its only API
+surface.
 
 ## 5. Component specifications
 
@@ -166,10 +176,11 @@ later if a second consumer appears (D16).
 - Spawn `pw-record` (preferred) or `parec` (fallback) as a subprocess capturing
   16 kHz mono S16LE PCM to a pipe.
 - **Frame format is locked (D15)**: 16 kHz, mono, int16 little-endian,
-  80 ms chunks = 1280 samples = 2560 bytes per frame. Producers and
-  consumers across `internal/audio`, `internal/asr`, `internal/wyoming`,
-  and a future `internal/wake` all assume this exact shape with no
-  resampling.
+  80 ms chunks = 1280 samples = 2560 bytes per frame (matches the
+  constants exposed by `asrclient` for the same values). Producers and
+  consumers across `internal/audio`, `internal/asr`, the
+  `asrclient` module, and a future `internal/wake` all assume this
+  exact shape with no resampling.
 - Provide a `Capture` interface with `Start(ctx) <-chan Frame`, `Stop() error`.
 - Maintain a ring buffer of the last N seconds (configurable, default 30s) for
   silence-detect lookback (and v2 wakeword pre-roll).
@@ -266,35 +277,30 @@ hangover_ms = 800        # silence required to declare end-of-utterance
 calibrate_ms = 500       # initial silence assumed for noise-floor calibration
 ```
 
-### 5.2 `internal/asr`
+### 5.2 `internal/asr` (selector) and `internal/whispersup` (lifecycle)
 
 **Responsibilities**
 
-- Define a `Backend` interface for transcription.
-- Provide three implementations in v1:
-  - `wyoming.go` (default) -- TCP client to a Wyoming-protocol STT server
-    (e.g. `wyoming-faster-whisper`, `wyoming-whisper-cpp`). Pure Go, no
-    daemon-side lifecycle: assumes the server is up and reconnects with
-    exponential backoff (1s -> 30s, capped) on disconnect. Imports the
-    `internal/wyoming` package (D16). Streams `audio-chunk` events at
-    the locked 80ms cadence; on `audio-stop` waits for the next
-    `transcript` event.
-  - `whispercpp.go` -- daemon-managed `whisper-server` (the OpenAI-
-    compatible HTTP server shipped with `whisper.cpp`) as a supervised
-    subprocess on loopback. Daemon owns lifecycle: spawn at startup,
-    health-check via `/health`, exponential-backoff restart on crash.
-    Daemon does NOT advertise ASR readiness on its control socket
-    until `/health` reports green.
-  - `openai.go` -- daemon talks to a user-managed OpenAI-protocol HTTP
-    endpoint (cloud or LAN). No lifecycle management. TLS verify
-    default-on.
+The `Backend` interface, the three protocol implementations, and the
+shared `Options` / `Transcript` / `Segment` types live in
+`github.com/matthewjhunter/asrclient` -- not in this repository. dicta
+imports that module.
 
-`whispercpp` and `openai` share an HTTP client core that uses the
-OpenAI-compatible `POST /v1/audio/transcriptions` endpoint with
-`multipart/form-data` (fields: `file`, `model`). This is NOT a raw WAV
-body -- the multipart encoding is required by the protocol.
+dicta provides two thin layers on top:
 
-**Interface**
+- `internal/asr.Select(cfg)` returns an `asrclient.Backend` constructed
+  from the configured `[asr]` block: `asrclient/wyoming.NewClient(addr)`,
+  `asrclient/whispercpp.NewClient(opts...)`, or
+  `asrclient/openai.NewClient(apiKey, opts...)`.
+- `internal/whispersup` supervises the local `whisper-server` subprocess
+  when the whispercpp backend is selected: spawn at startup with
+  port-discovery, exponential-backoff restart on crash, `/health`
+  gating. The daemon does not advertise ASR readiness on its control
+  socket until the supervisor reports green. The supervisor owns the
+  binary path and CLI flags from `[asr.whispercpp]` config; the
+  `asrclient/whispercpp.Client` is told the resulting endpoint URL.
+
+**Backend interface (provided by asrclient, repeated here for context):**
 
 ```go
 type Backend interface {
@@ -369,10 +375,11 @@ A failed health probe transitions the backend to `unhealthy`, which causes
 build. v2 ships two modes behind a `Mode` knob:
 
 - `wyoming` (default) -- TCP client to a Wyoming-protocol wakeword server
-  (e.g. `wyoming-openwakeword`). Pure Go, no CGo. Imports the same
-  `internal/wyoming` package the ASR client uses. Auto-reconnect with
-  exponential backoff. This is the intended default and keeps daemon
-  builds pure Go.
+  (e.g. `wyoming-openwakeword`). Pure Go, no CGo. Reuses the
+  low-level `asrclient/wyoming` event/wire surface (Event, Conn,
+  ReadEvent, WriteEvent) -- detect events live on the same protocol.
+  Auto-reconnect with exponential backoff. This is the intended default
+  and keeps daemon builds pure Go.
 - `embedded` -- build-tagged `//go:build onnx`. Loads `melspectrogram.onnx`
   + `embedding_model.onnx` + per-keyword scoring models from a config
   directory using `yalue/onnxruntime_go` (CGo). Reimplements the
@@ -787,11 +794,11 @@ unit or distro package. The daemon does not start it.
   must declare these as panel-only runtime deps; the daemon and CLI
   packages do not depend on them.
 - Pinned third-party deps for daemon (all pure Go): `pelletier/go-toml/v2`,
-  `coreos/go-systemd/v22/daemon`, `uber-go/goleak` (test-only).
-- All shared protocols and helpers live in-tree under `internal/`. The
-  Wyoming wire-format client at `internal/wyoming` is written with zero
-  `dicta`-specific imports so it can be lifted into a standalone module
-  if a second consumer appears (D16). Per D16: NO source dependency
+  `coreos/go-systemd/v22/daemon`, `uber-go/goleak` (test-only),
+  `github.com/matthewjhunter/asrclient` (Wyoming wire protocol +
+  OpenAI-compatible HTTP transcription clients; see D16).
+- The `asrclient` module is owned alongside `dicta` and pinned to a
+  specific module version in `go.mod`. Per D16: NO source dependency
   on `majordomo`.
 - SBOM via `cyclonedx-gomod`.
 
@@ -804,27 +811,30 @@ demonstrable before the next phase begins.
    and `cmd/dicta` stubs, control socket round-trip (commands only, with
    line-length cap), systemd unit (unhardened first, hardened in
    phase 10).
-2. **Implement `internal/wyoming`.** In-tree, pure Go. Wire protocol
-   (header line + data + payload), event constructors (`AudioStart`,
-   `AudioChunk`, `AudioStop`, `Describe`, `Detect`, `Transcript`),
-   `Dial` / `WriteEvent` / `ReadEvent`, table-driven tests against
-   captured wire bytes. Stand it up before any ASR work so the default
-   backend has a working transport from day one. Keep it free of
-   `dicta`-specific imports so it remains promotion-ready.
+2. **Bootstrap `asrclient`.** Separate `github.com/matthewjhunter/asrclient`
+   module with `Backend` interface, audio-format constants, and Wyoming
+   wire protocol + Backend impl (table-driven tests against captured
+   wire bytes; integration test gated on a live server). Done before
+   any ASR work in `dicta` so the default backend has a working
+   transport from day one. `dicta` imports it as a normal dependency.
 3. **Audio capture + VAD.** `pw-record` subprocess emitting locked-format
    80ms / 1280-sample frames, frame channel, ring buffer, pure-Go
    energy VAD with the §5.1 calibration spec, in-tree `IsQuiet`
    helper, mic-cue tone generator. Manual test via `dicta status`
    showing audio frames flowing and VAD speech/silence transitions.
-4. **ASR -- `wyoming` backend (default).** Connect to configured TCP
-   server, stream audio, await transcript, exponential-backoff
-   reconnect. Manual test: capture a clip and print transcript to log
-   against a local `wyoming-faster-whisper`.
-5. **ASR -- `whispercpp` backend.** `whisper-server` supervised
-   subprocess, `/health` gating, multipart upload to
-   `/v1/audio/transcriptions`. Selectable via config.
-6. **ASR -- `openai` backend.** Same HTTP core as `whispercpp` minus the
-   lifecycle. TLS verify default-on.
+4. **ASR -- `wyoming` backend (default).** dicta's `internal/asr.Select`
+   returns an `asrclient/wyoming.Client` for `[asr] backend = "wyoming"`.
+   Stream audio, await transcript, exponential-backoff reconnect on
+   transport errors. Manual test: capture a clip and print transcript
+   to log against a local `wyoming-faster-whisper`.
+5. **ASR -- `whispercpp` backend.** `internal/whispersup` supervises
+   the `whisper-server` subprocess (port discovery, `/health` gating,
+   restart-on-crash). `internal/asr.Select` wires
+   `asrclient/whispercpp.NewClient(WithEndpoint(supervisedURL))` once
+   the supervisor reports green. Selectable via config.
+6. **ASR -- `openai` backend.** dicta's `internal/asr.Select` returns an
+   `asrclient/openai.NewClient(apiKey, ...)` for `[asr] backend = "openai"`.
+   No subprocess lifecycle; TLS verify default-on (per asrclient defaults).
 7. **Type-mode session + dispatch.** Orchestrator state machine in
    `cmd/dictad/main.go` for the type-mode session (open on Pause command,
    per-utterance commit on VAD silence, close on Pause command). `Type()`
@@ -878,7 +888,8 @@ Wakeword (`internal/wake`) is v2 and not part of this sequence.
 - **ydotool** -- userland input event injector via `/dev/uinput`
 - **Wyoming** -- JSON-header + binary-payload TCP wire protocol for local
   voice services (STT, wakeword, TTS), originated by Home Assistant.
-  `dicta`'s implementation lives in-tree at `internal/wyoming`.
+  `dicta`'s implementation is consumed from the
+  `github.com/matthewjhunter/asrclient` module under `asrclient/wyoming`.
 
 ---
 

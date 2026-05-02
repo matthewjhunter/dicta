@@ -25,9 +25,9 @@ These are non-negotiable without re-opening the design. The IDs map to §3 of th
 - **D6 — Type-mode and clip-mode are mutually exclusive.** Activating one while the other is open closes the active mode first.
 - **D12 — Mode-specific safety boundaries.** Type-mode: the open Pause session IS the safety boundary; only within an open session can VAD silence trigger ydotool. Clip-mode: the preview panel IS the pending buffer; nothing reaches `wl-copy` until Enter is pressed inside the panel. Type-mode dispatch strips `\n` defensively before ydotool to prevent newline injection.
 - **D13 — Daemon and CLI are pure Go, no CGo, no Python.** `dictad` and `dicta` build with `CGO_ENABLED=0` and produce static binaries. The `dicta-preview` sidecar is on a separate process boundary and may use any UI toolkit (GTK4, Qt6, gioui.org); D13 only constrains the daemon and CLI.
-- **D15 — Audio frame format is locked: 16 kHz, mono, int16 LE, 80 ms / 1280-sample / 2560-byte chunks.** Every producer and consumer across `internal/audio`, `internal/asr`, `internal/wyoming`, and a future `internal/wake` assumes this exact shape. No resampling, no re-chunking.
-- **D16 — No source dependency on `majordomo`.** That project is on hiatus. Do not import, `replace`, vendor, or git-submodule it. Every shared concept (Wyoming wire protocol, `IsQuiet` helper, mic-cue tones) is reimplemented fresh in-tree under `internal/`. `internal/wyoming` must keep zero `dicta`-specific imports so it stays promotion-ready as a standalone module.
-- **D2 — Three ASR backends in v1**: `wyoming` (default, TCP), `whispercpp` (daemon-supervised subprocess on loopback HTTP), `openai` (user-managed HTTP). `whispercpp`+`openai` share an HTTP core using OpenAI-compatible `POST /v1/audio/transcriptions` with `multipart/form-data` — not a raw WAV body.
+- **D15 — Audio frame format is locked: 16 kHz, mono, int16 LE, 80 ms / 1280-sample / 2560-byte chunks.** Every producer and consumer across `internal/audio`, `internal/asr`, the `asrclient` module, and a future `internal/wake` assumes this exact shape. No resampling, no re-chunking. The same constants are exported by `asrclient` (SampleRateHz, FrameBytes, etc.) — use those in code that crosses the module boundary.
+- **D16 — No source dependency on `majordomo`.** That project is on hiatus. Do not import, `replace`, vendor, or git-submodule it. The Wyoming wire protocol and OpenAI-compatible HTTP transcription clients live in `github.com/matthewjhunter/asrclient` (sibling repo at `~/go/src/github.com/matthewjhunter/asrclient`); dicta consumes that module as a normal Go dependency. PCM-format helpers (`IsQuiet`, mic-cue tones) are reimplemented fresh in-tree under `internal/audio`.
+- **D2 — Three ASR backends in v1, all from `asrclient`**: `asrclient/wyoming.Client` (default, TCP), `asrclient/whispercpp.Client` (HTTP to a dicta-supervised local `whisper-server`), `asrclient/openai.Client` (HTTPS to a user-managed endpoint). Subprocess *lifecycle* for whisper-server (spawn, port discovery, restart-on-crash, /health gating) lives in dicta's `internal/whispersup` — `asrclient/whispercpp` is just the HTTP client, kept lifecycle-free so the module stays consumer-agnostic.
 - **D3 — Wakeword is deferred to v2.** Do not start `internal/wake` work. The control protocol reserves `wake_*` but v1 must respond `not_implemented`.
 - **D17 — Single-key hotkey defaults only.** v1 ships exactly two compositor bindings: Pause (type) and Scroll Lock (clip). No global commit or cancel hotkeys — those are panel-local in clip-mode and don't exist in type-mode (Pause itself closes the session). No modifier chords in shipped examples, default config, or docs.
 
@@ -37,8 +37,8 @@ The packages below must NOT import each other. The mode state machine (open/clos
 
 ```
 internal/audio       capture, VAD, ringbuffer, mic-cue tones, IsQuiet
-internal/asr         backend interface + wyoming/whispercpp/openai impls
-internal/wyoming     Wyoming wire protocol — keep zero dicta-specific imports (D16)
+internal/asr         thin selector returning an asrclient.Backend per [asr] config
+internal/whispersup  whisper-server subprocess supervisor (whispercpp backend only)
 internal/cleanup     LLM cleanup client (OpenAI-protocol)
 internal/dispatch    ydotool + wl-copy + notify-send wrappers (no policy)
 internal/control     Unix socket server: command channel + event subscriptions
@@ -86,7 +86,7 @@ Type-mode commits depend on `internal/audio`'s energy VAD firing correctly. The 
 
 Follow §12 of the design doc. Two ordering invariants matter:
 
-- Phase 2 (`internal/wyoming`) ships **before** any ASR work so the default backend has a working transport from day one.
+- Phase 2 (bootstrap `asrclient` with the Wyoming wire protocol + Backend impl) ships **before** any ASR work in dicta so the default backend has a working transport from day one. asrclient lives at `~/go/src/github.com/matthewjhunter/asrclient`; dicta imports it via go.mod.
 - Phase 8 (control-socket event subscription) ships **before** phase 9 (`dicta-preview`) so the panel has live transcripts to display.
 
 Don't reorder phases without updating the design doc first.
