@@ -37,6 +37,10 @@ func main() {
 	whisperModelFlag := flag.String("whispercpp-model", "", "whisper-server model path (whispercpp backend)")
 	whisperPortFlag := flag.Int("whispercpp-port", 0, "whisper-server bind port (0 = pick free ephemeral)")
 	whisperThreadsFlag := flag.Int("whispercpp-threads", 0, "whisper-server thread count (0 = auto)")
+	openaiKeyEnvFlag := flag.String("asr-openai-key-env", "OPENAI_API_KEY", "env var holding the openai API key (openai backend)")
+	openaiEndpointFlag := flag.String("asr-openai-endpoint", "", "openai transcription endpoint URL (empty = asrclient default)")
+	openaiModelFlag := flag.String("asr-openai-model", "", "openai transcription model name (empty = asrclient default)")
+	openaiSkipVerifyFlag := flag.Bool("asr-openai-tls-skip-verify", false, "DANGEROUS: skip TLS certificate verification on the openai endpoint (testing only)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -69,6 +73,12 @@ func main() {
 		asrCfg := asr.Config{
 			Backend: *asrBackendFlag,
 			Wyoming: asr.WyomingConfig{Addr: *asrAddrFlag},
+			OpenAI: asr.OpenAIConfig{
+				APIKeyEnv:             *openaiKeyEnvFlag,
+				Endpoint:              *openaiEndpointFlag,
+				Model:                 *openaiModelFlag,
+				InsecureSkipTLSVerify: *openaiSkipVerifyFlag,
+			},
 		}
 
 		// whispercpp requires the supervisor to start whisper-server and
