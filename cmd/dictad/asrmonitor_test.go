@@ -12,7 +12,6 @@ import (
 
 	"github.com/matthewjhunter/asrclient"
 	"github.com/matthewjhunter/dicta/internal/asr"
-	"github.com/matthewjhunter/dicta/internal/control"
 )
 
 // fakeASR is a controllable asr.Backend for asrMonitor tests.
@@ -192,70 +191,6 @@ func TestASRMonitor_HealthLoopMarksUnhealthy(t *testing.T) {
 func TestASRMonitor_StopBeforeStart(t *testing.T) {
 	m := newASRMonitor(discardLogger(), &fakeASR{}, asrMonitorConfig{BackendName: "fake"})
 	m.Stop() // no-op
-}
-
-func TestASRMonitor_PublishesTranscriptEvent(t *testing.T) {
-	f := &fakeASR{transcript: asrclient.Transcript{Text: "hello world", Language: "en"}}
-	m := newASRMonitor(discardLogger(), f, asrMonitorConfig{
-		BackendName:       "fake",
-		HealthInterval:    time.Hour,
-		TranscribeTimeout: time.Second,
-		MaxConcurrent:     2,
-	})
-	bus := newEventBus(discardLogger())
-	r := &recordingPush{}
-	bus.Subscribe([]string{"transcript"}, r.Push)
-	m.SetEventBus(bus)
-
-	m.OnUtterance(make([]byte, 1280), nil)
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(r.Events()) >= 1 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	got := r.Events()
-	if len(got) != 1 {
-		t.Fatalf("expected 1 transcript event; got %d", len(got))
-	}
-	td, ok := got[0].Data.(control.TranscriptData)
-	if !ok {
-		t.Fatalf("event data: got %T want TranscriptData", got[0].Data)
-	}
-	if td.Text != "hello world" {
-		t.Errorf("Text: got %q", td.Text)
-	}
-	if !td.Final {
-		t.Error("Final: want true (v1 only emits final transcripts)")
-	}
-	if td.UtteranceID == "" {
-		t.Error("UtteranceID: want non-empty")
-	}
-	if td.Language != "en" {
-		t.Errorf("Language: got %q", td.Language)
-	}
-}
-
-func TestASRMonitor_NoEventOnEmptyTranscript(t *testing.T) {
-	f := &fakeASR{transcript: asrclient.Transcript{Text: "   "}}
-	m := newASRMonitor(discardLogger(), f, asrMonitorConfig{
-		BackendName:       "fake",
-		HealthInterval:    time.Hour,
-		TranscribeTimeout: time.Second,
-		MaxConcurrent:     1,
-	})
-	bus := newEventBus(discardLogger())
-	r := &recordingPush{}
-	bus.Subscribe([]string{"transcript"}, r.Push)
-	m.SetEventBus(bus)
-
-	m.OnUtterance(make([]byte, 1280), nil)
-	time.Sleep(100 * time.Millisecond)
-	if got := len(r.Events()); got != 0 {
-		t.Errorf("empty transcript should not publish; got %d events", got)
-	}
 }
 
 func TestASRMonitor_BackendInterface(t *testing.T) {

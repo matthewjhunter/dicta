@@ -10,8 +10,44 @@ import (
 
 	"github.com/matthewjhunter/asrclient"
 	"github.com/matthewjhunter/dicta/internal/audio"
+	"github.com/matthewjhunter/dicta/internal/cleanup"
 	"github.com/matthewjhunter/dicta/internal/control"
 )
+
+// fakeCleaner records every Clean call and lets tests dictate the
+// returned text or error per profile.
+type fakeCleaner struct {
+	mu     sync.Mutex
+	calls  []fakeCleanCall
+	result string // returned when err is nil and result != ""
+	err    error
+}
+
+type fakeCleanCall struct {
+	Raw     string
+	Profile cleanup.Profile
+}
+
+func (f *fakeCleaner) Clean(_ context.Context, raw string, profile cleanup.Profile) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, fakeCleanCall{Raw: raw, Profile: profile})
+	if f.err != nil {
+		return "", f.err
+	}
+	if f.result != "" {
+		return f.result, nil
+	}
+	return raw, nil
+}
+
+func (f *fakeCleaner) Calls() []fakeCleanCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]fakeCleanCall, len(f.calls))
+	copy(out, f.calls)
+	return out
+}
 
 // fakeTyper records every Type call so tests can assert what made it
 // to ydotool. Mirrors the dispatch.Typer interface.
@@ -171,7 +207,7 @@ func newTestSession(t *testing.T) (*session, *fakeTyper, *fakeCuer, *resettableV
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
-	s := newSession(discardLogger(), typer, nil, cuer, asrMon, vad, nil, nil, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, vad, nil, nil, nil, t.Context())
 	return s, typer, cuer, vad, asrFake
 }
 
@@ -348,7 +384,7 @@ func TestSession_PublishesSessionStateOnOpenAndClose(t *testing.T) {
 	r := &recordingPush{}
 	bus.Subscribe([]string{"session_state"}, r.Push)
 
-	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, bus, nil, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, bus, nil, nil, t.Context())
 
 	if err := s.Toggle(t.Context(), "type"); err != nil {
 		t.Fatal(err)
@@ -405,7 +441,7 @@ func newClipSession(t *testing.T) (*session, *fakeClipper, *fakePreview, *fakeCu
 		BackendName:    "fake",
 		HealthInterval: time.Hour,
 	})
-	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, nil, preview, t.Context())
+	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, nil, preview, nil, t.Context())
 	return s, clipper, preview, cuer
 }
 
@@ -551,5 +587,231 @@ func TestSession_TypeOpenClosesActiveClipFirst(t *testing.T) {
 	_, kills, running := preview.Stats()
 	if kills != 1 || running {
 		t.Errorf("preview should be killed by D6; kills=%d running=%v", kills, running)
+	}
+}
+
+// TestSession_TypeModePublishesRawTranscript: in type-mode, the
+// transcript event sent to subscribers must be the raw ASR output.
+// Cleanup is never invoked. This is also the regression test for the
+// publish-from-asrMon → publish-from-session refactor.
+func TestSession_TypeModePublishesRawTranscript(t *testing.T) {
+	typer := &fakeTyper{}
+	cuer := &fakeCuer{}
+	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "hello world", Language: "en"}}
+	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
+		BackendName:       "fake",
+		HealthInterval:    time.Hour,
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     2,
+	})
+	bus := newEventBus(discardLogger())
+	r := &recordingPush{}
+	bus.Subscribe([]string{"transcript"}, r.Push)
+	cleaner := &fakeCleaner{result: "CLEANED-NEVER-USED"}
+
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, bus, nil, cleaner, t.Context())
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatal(err)
+	}
+	s.OnUtterance(make([]byte, 1280))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(r.Events()) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	got := r.Events()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 transcript event; got %d", len(got))
+	}
+	td, ok := got[0].Data.(control.TranscriptData)
+	if !ok {
+		t.Fatalf("event data: got %T want TranscriptData", got[0].Data)
+	}
+	if td.Text != "hello world" {
+		t.Errorf("Text: got %q want raw %q (cleanup must not run in type-mode)", td.Text, "hello world")
+	}
+	if !td.Final {
+		t.Error("Final: want true")
+	}
+	if td.UtteranceID == "" {
+		t.Error("UtteranceID: want non-empty")
+	}
+	if td.Language != "en" {
+		t.Errorf("Language: got %q want en", td.Language)
+	}
+
+	if calls := cleaner.Calls(); len(calls) != 0 {
+		t.Errorf("cleaner must not be invoked in type-mode; got %v", calls)
+	}
+}
+
+// TestSession_ClipModePublishesCleanedTranscript: in clip-mode, the
+// raw ASR output passes through cleanup with ProfileMechanical and the
+// CLEANED text is what reaches subscribers. The typer is never called.
+func TestSession_ClipModePublishesCleanedTranscript(t *testing.T) {
+	typer := &fakeTyper{}
+	clipper := &fakeClipper{}
+	preview := &fakePreview{}
+	cuer := &fakeCuer{}
+	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "i ate apples there delicious", Language: "en"}}
+	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
+		BackendName:       "fake",
+		HealthInterval:    time.Hour,
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     2,
+	})
+	bus := newEventBus(discardLogger())
+	r := &recordingPush{}
+	bus.Subscribe([]string{"transcript"}, r.Push)
+	cleaner := &fakeCleaner{result: "I ate apples; they're delicious."}
+
+	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, bus, preview, cleaner, t.Context())
+	if err := s.Toggle(t.Context(), "clip"); err != nil {
+		t.Fatal(err)
+	}
+	s.OnUtterance(make([]byte, 1280))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(r.Events()) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	got := r.Events()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 transcript event; got %d", len(got))
+	}
+	td := got[0].Data.(control.TranscriptData)
+	if td.Text != "I ate apples; they're delicious." {
+		t.Errorf("Text: got %q want cleaned version", td.Text)
+	}
+
+	calls := cleaner.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("cleaner calls: got %d want 1", len(calls))
+	}
+	if calls[0].Profile != cleanup.ProfileMechanical {
+		t.Errorf("profile: got %q want mechanical", calls[0].Profile)
+	}
+	if calls[0].Raw != "i ate apples there delicious" {
+		t.Errorf("raw: got %q", calls[0].Raw)
+	}
+
+	if got := typer.Calls(); len(got) != 0 {
+		t.Errorf("typer must not be called in clip-mode; got %v", got)
+	}
+}
+
+// TestSession_ClipModeCleanupErrorFallsBackToRaw: when the cleanup
+// endpoint fails, the panel should still receive *something* (the raw
+// transcript) — losing punctuation polish is preferable to losing the
+// utterance entirely. A WARN is logged but the event still publishes.
+func TestSession_ClipModeCleanupErrorFallsBackToRaw(t *testing.T) {
+	typer := &fakeTyper{}
+	clipper := &fakeClipper{}
+	preview := &fakePreview{}
+	cuer := &fakeCuer{}
+	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "hello there", Language: "en"}}
+	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
+		BackendName:       "fake",
+		HealthInterval:    time.Hour,
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     2,
+	})
+	bus := newEventBus(discardLogger())
+	r := &recordingPush{}
+	bus.Subscribe([]string{"transcript"}, r.Push)
+	cleaner := &fakeCleaner{err: errors.New("cleanup endpoint down")}
+
+	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, bus, preview, cleaner, t.Context())
+	if err := s.Toggle(t.Context(), "clip"); err != nil {
+		t.Fatal(err)
+	}
+	s.OnUtterance(make([]byte, 1280))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(r.Events()) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	got := r.Events()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 transcript event after cleanup failure; got %d", len(got))
+	}
+	td := got[0].Data.(control.TranscriptData)
+	if td.Text != "hello there" {
+		t.Errorf("Text: got %q want raw fallback %q", td.Text, "hello there")
+	}
+}
+
+// TestSession_NilCleanerDefaultsToPassthrough: passing nil for the
+// cleaner argument must not crash; the constructor wraps it with
+// cleanup.Passthrough so clip-mode publishes raw text.
+func TestSession_NilCleanerDefaultsToPassthrough(t *testing.T) {
+	typer := &fakeTyper{}
+	clipper := &fakeClipper{}
+	preview := &fakePreview{}
+	cuer := &fakeCuer{}
+	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "raw text"}}
+	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
+		BackendName:       "fake",
+		HealthInterval:    time.Hour,
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     2,
+	})
+	bus := newEventBus(discardLogger())
+	r := &recordingPush{}
+	bus.Subscribe([]string{"transcript"}, r.Push)
+
+	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, bus, preview, nil, t.Context())
+	if err := s.Toggle(t.Context(), "clip"); err != nil {
+		t.Fatal(err)
+	}
+	s.OnUtterance(make([]byte, 1280))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(r.Events()) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	got := r.Events()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 transcript event; got %d", len(got))
+	}
+	td := got[0].Data.(control.TranscriptData)
+	if td.Text != "raw text" {
+		t.Errorf("Text: got %q want raw passthrough", td.Text)
+	}
+}
+
+// TestSession_NoBusNoPublishCrash: cleanup still runs and dispatch
+// still fires when bus is nil; nil-bus must not panic.
+func TestSession_NoBusNoPublishCrash(t *testing.T) {
+	s, clipper, _, _ := newClipSession(t)
+	if err := s.Toggle(t.Context(), "clip"); err != nil {
+		t.Fatal(err)
+	}
+	s.OnUtterance(make([]byte, 1280))
+	time.Sleep(100 * time.Millisecond)
+
+	// Cleanup ran (default fakeASR returns ""), no panic. Commit the
+	// session via Cancel to avoid leaving the spawned panel running.
+	if err := s.Cancel(t.Context()); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if got := clipper.Calls(); len(got) != 0 {
+		t.Errorf("cancel should not Clip; got %v", got)
 	}
 }

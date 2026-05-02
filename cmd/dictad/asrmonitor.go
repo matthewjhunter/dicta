@@ -14,12 +14,10 @@ import (
 )
 
 // asrMonitor wraps an asr.Backend with health polling and lightweight
-// transcribe-and-log activity for the phase-4 manual-test deliverable.
-//
-// Like audioMonitor, this is the dev harness — phase 7 replaces it with
-// the real type-mode session orchestrator. Until then it serves as the
-// place where audio frames detected by the VAD as a complete utterance
-// get sent to the configured ASR backend, with the transcript logged.
+// transcribe-and-log activity. As of phase 10 the monitor no longer
+// publishes events directly: the session orchestrator owns the
+// transcript publish path because only it knows the mode (and whether
+// to apply LLM cleanup before publishing).
 type asrMonitor struct {
 	backend asr.Backend
 	logger  *slog.Logger
@@ -41,14 +39,20 @@ type asrMonitor struct {
 	// can't pile up goroutines.
 	inflight chan struct{}
 
-	// bus is the daemon-side event broadcaster (phase 8). Optional —
-	// nil bus means transcripts are not published, only logged.
-	bus *eventBus
-
 	// utteranceSeq is the monotonic counter used to assign IDs to
 	// each utterance. Combined with the unix timestamp at submit time
 	// it produces a sortable, unique-per-daemon-restart string.
 	utteranceSeq atomic.Uint64
+}
+
+// transcriptResult is the payload the asrMonitor hands to the session
+// after a successful Transcribe. Carrying the utteranceID and language
+// alongside the text lets the session publish a complete TranscriptData
+// event without re-deriving them.
+type transcriptResult struct {
+	Text        string
+	UtteranceID string
+	Language    string
 }
 
 type asrMonitorConfig struct {
@@ -88,10 +92,6 @@ func newASRMonitor(logger *slog.Logger, backend asr.Backend, cfg asrMonitorConfi
 	return m
 }
 
-// SetEventBus wires an event bus so each successful transcription is
-// published as a "transcript" event. Nil unsubscribes (no-op publish).
-func (m *asrMonitor) SetEventBus(b *eventBus) { m.bus = b }
-
 // Start launches the health-poll goroutine. Stop or ctx cancellation
 // halts polling; in-flight Transcribe calls continue to completion since
 // they hold their own deadlines.
@@ -126,12 +126,13 @@ func (m *asrMonitor) Stop() {
 // utterance is dropped with a WARN — better than queueing audio that
 // will arrive minutes late.
 //
-// onTranscript, if non-nil, is invoked with the trimmed transcript text
-// after a successful transcription. It runs on the same goroutine as
-// the Transcribe call, so a slow handler will hold an inflight slot —
-// keep it cheap (the production path hands off to a Typer.Type that
-// internally chunks and sleeps).
-func (m *asrMonitor) OnUtterance(pcm []byte, onTranscript func(text string)) {
+// onTranscript, if non-nil, is invoked with the trimmed transcript and
+// associated metadata after a successful transcription. It runs on the
+// same goroutine as the Transcribe call, so a slow handler will hold an
+// inflight slot — keep it cheap (the production path hands off to a
+// Typer.Type that internally chunks and sleeps, or to a cleanup HTTP
+// call bounded by its own timeout).
+func (m *asrMonitor) OnUtterance(pcm []byte, onTranscript func(transcriptResult)) {
 	if len(pcm) == 0 {
 		return
 	}
@@ -144,7 +145,7 @@ func (m *asrMonitor) OnUtterance(pcm []byte, onTranscript func(text string)) {
 	go m.transcribe(pcm, onTranscript)
 }
 
-func (m *asrMonitor) transcribe(pcm []byte, onTranscript func(text string)) {
+func (m *asrMonitor) transcribe(pcm []byte, onTranscript func(transcriptResult)) {
 	defer func() { <-m.inflight }()
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.TranscribeTimeout)
 	defer cancel()
@@ -170,19 +171,12 @@ func (m *asrMonitor) transcribe(pcm []byte, onTranscript func(text string)) {
 		"utterance_id", uttID,
 		"audio_ms", int(time.Duration(len(pcm))/time.Duration(2*16)),
 		"duration_ms", dur.Milliseconds())
-	if m.bus != nil && text != "" {
-		m.bus.Publish(control.Event{
-			Event: "transcript",
-			Data: control.TranscriptData{
-				Text:        text,
-				Final:       true,
-				UtteranceID: uttID,
-				Language:    tr.Language,
-			},
-		})
-	}
 	if onTranscript != nil && text != "" {
-		onTranscript(text)
+		onTranscript(transcriptResult{
+			Text:        text,
+			UtteranceID: uttID,
+			Language:    tr.Language,
+		})
 	}
 }
 

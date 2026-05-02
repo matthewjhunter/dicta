@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/matthewjhunter/dicta/internal/audio"
+	"github.com/matthewjhunter/dicta/internal/cleanup"
 	"github.com/matthewjhunter/dicta/internal/control"
 	"github.com/matthewjhunter/dicta/internal/dispatch"
 )
@@ -60,6 +61,7 @@ type session struct {
 	vad     audio.VAD         // optional: Reset() called on session-open if non-nil
 	bus     *eventBus         // optional; nil = no event publish
 	preview previewController // optional; required for clip-mode
+	cleaner cleanup.Cleaner   // optional; nil = passthrough for both modes
 
 	// daemonCtx is the long-lived parent ctx for typer dispatch. We do
 	// NOT derive a per-session ctx here because cancelling a session
@@ -89,7 +91,10 @@ var ErrCommitOnlyValidInClipMode = fmt.Errorf("commit only valid while clip-mode
 // for the cancel command.
 var ErrCancelOnlyValidInClipMode = fmt.Errorf("cancel only valid while clip-mode session is open")
 
-func newSession(logger *slog.Logger, typer dispatch.Typer, clipper dispatch.Clipper, cuer audio.Cuer, asrMon *asrMonitor, vad audio.VAD, bus *eventBus, preview previewController, daemonCtx context.Context) *session {
+func newSession(logger *slog.Logger, typer dispatch.Typer, clipper dispatch.Clipper, cuer audio.Cuer, asrMon *asrMonitor, vad audio.VAD, bus *eventBus, preview previewController, cleaner cleanup.Cleaner, daemonCtx context.Context) *session {
+	if cleaner == nil {
+		cleaner = cleanup.Passthrough()
+	}
 	s := &session{
 		logger:    logger,
 		typer:     typer,
@@ -99,6 +104,7 @@ func newSession(logger *slog.Logger, typer dispatch.Typer, clipper dispatch.Clip
 		vad:       vad,
 		bus:       bus,
 		preview:   preview,
+		cleaner:   cleaner,
 		daemonCtx: daemonCtx,
 	}
 	if preview != nil {
@@ -296,7 +302,17 @@ func (s *session) publishState(mode sessionMode, open bool) {
 
 // OnUtterance is the audioMonitor hook. If no session is open, drop.
 // Otherwise capture the current epoch and forward to the asrMonitor
-// with a transcript callback that re-checks the epoch before typing.
+// with a transcript callback that re-checks the epoch before acting.
+//
+// Type-mode: raw transcript → publish raw event → ydotool. Cleanup is
+// not invoked (D12: cleanup runs on clip-mode text only).
+//
+// Clip-mode: raw transcript → mechanical cleanup → publish cleaned
+// event. The panel subscribes to "transcript" events and renders the
+// cleaned text in its editable buffer; nothing reaches the clipboard
+// until the user presses Enter inside the panel. Cleanup errors fall
+// back to the raw transcript with a WARN — losing punctuation polish
+// is preferable to losing the utterance entirely.
 //
 // Drops are silent (no log) — a 1-Hz speech burst produces 1+ drops
 // per second when the session is closed; logging each one would be
@@ -308,23 +324,68 @@ func (s *session) OnUtterance(pcm []byte) {
 	epoch := s.epoch
 	s.mu.Unlock()
 
-	if !open || mode != modeType {
+	if !open || (mode != modeType && mode != modeClip) {
 		return
 	}
 
-	s.asrMon.OnUtterance(pcm, func(text string) {
+	s.asrMon.OnUtterance(pcm, func(tr transcriptResult) {
 		s.mu.Lock()
 		current := s.epoch
-		stillOpen := s.open && s.mode == modeType
+		stillOpen := s.open && s.mode == mode
 		s.mu.Unlock()
 		if !stillOpen || current != epoch {
 			s.logger.Info("session.transcript dropped: session changed",
-				"submit_epoch", epoch, "current_epoch", current, "text_len", len(text))
+				"submit_epoch", epoch, "current_epoch", current, "text_len", len(tr.Text))
 			return
 		}
-		if err := s.typer.Type(s.daemonCtx, text); err != nil {
-			s.logger.Warn("session.type dispatch failed", "err", err)
+
+		switch mode {
+		case modeType:
+			s.publishTranscript(tr, tr.Text)
+			if err := s.typer.Type(s.daemonCtx, tr.Text); err != nil {
+				s.logger.Warn("session.type dispatch failed", "err", err)
+			}
+		case modeClip:
+			cleaned := s.runCleanup(tr.Text)
+			s.publishTranscript(tr, cleaned)
 		}
+	})
+}
+
+// runCleanup runs the mechanical profile on raw and returns the cleaned
+// text. The cleanup call is bounded by the cleaner's own timeout
+// (cleanup.Config.Timeout). On error we fall back to the raw transcript
+// with a WARN: the panel should still see *something* even if the
+// cleanup endpoint is down, and the user can fix punctuation by hand
+// before pressing Enter.
+func (s *session) runCleanup(raw string) string {
+	cleanCtx, cancel := context.WithCancel(s.daemonCtx)
+	defer cancel()
+	cleaned, err := s.cleaner.Clean(cleanCtx, raw, cleanup.ProfileMechanical)
+	if err != nil {
+		s.logger.Warn("session.cleanup failed; falling back to raw transcript",
+			"err", err, "raw_len", len(raw))
+		return raw
+	}
+	return cleaned
+}
+
+// publishTranscript emits a transcript event to the bus. The text
+// argument is the version that should reach subscribers (raw for type-
+// mode, cleaned for clip-mode). The utteranceID and language ride
+// through unchanged so subscribers can correlate.
+func (s *session) publishTranscript(tr transcriptResult, text string) {
+	if s.bus == nil || text == "" {
+		return
+	}
+	s.bus.Publish(control.Event{
+		Event: "transcript",
+		Data: control.TranscriptData{
+			Text:        text,
+			Final:       true,
+			UtteranceID: tr.UtteranceID,
+			Language:    tr.Language,
+		},
 	})
 }
 

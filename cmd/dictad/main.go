@@ -130,7 +130,6 @@ func main() {
 			HealthInterval:    10 * time.Second,
 			TranscribeTimeout: 30 * time.Second,
 		})
-		asrMon.SetEventBus(bus)
 		asrMon.Start(ctx)
 		defer asrMon.Stop()
 		defer backend.Close()
@@ -188,7 +187,7 @@ func main() {
 			logger.Info("clip-mode enabled", "preview", *previewBinaryFlag, "wl_copy", *wlCopyBinaryFlag)
 		}
 
-		sess = newSession(logger, typer, clipper, cuer, handler.asr, audioMon.VAD(), bus, preview, ctx)
+		sess = newSession(logger, typer, clipper, cuer, handler.asr, audioMon.VAD(), bus, preview, nil /* cleaner: phase 10 wires this next */, ctx)
 		audioMon.onUtterance = sess.OnUtterance
 		handler.session = sess
 		logger.Info("session orchestrator ready", "ydotool", *ydotoolBinaryFlag, "audio_cues", *audioCuesFlag)
