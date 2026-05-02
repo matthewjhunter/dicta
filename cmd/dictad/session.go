@@ -294,6 +294,22 @@ func (s *session) Cancel(ctx context.Context) error {
 	return s.close(ctx, "cancel")
 }
 
+// Shutdown is the SIGTERM hook (§12 design doc): if a session is open
+// at daemon shutdown, close it explicitly so the close-cue plays, the
+// audit/event log records the close, and (for clip-mode) the preview
+// panel gets an explicit Kill on top of the ctx-cancellation that
+// already fired. Idempotent: a closed session is a no-op.
+func (s *session) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	open := s.open
+	s.mu.Unlock()
+	if !open {
+		return nil
+	}
+	s.logger.Info("session.shutdown: closing open session before exit")
+	return s.close(ctx, "shutdown")
+}
+
 // publishState emits a session_state event on the bus. Calls without a
 // bus configured are silent no-ops, which keeps tests that don't care
 // about event plumbing simple.

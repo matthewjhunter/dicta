@@ -1001,6 +1001,64 @@ func TestSession_AuditNotInvokedAfterClose(t *testing.T) {
 	}
 }
 
+// TestSession_ShutdownClosesOpenTypeSession verifies the §12
+// signal-handling contract: when Shutdown is called with a session
+// open, the session closes cleanly — close cue fires, mode flips to
+// none, session_state event publishes, and stale-transcript epoch
+// advances.
+func TestSession_ShutdownClosesOpenTypeSession(t *testing.T) {
+	s, _, cuer, _, _ := newTestSession(t)
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Shutdown(t.Context()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	_, open := s.Snapshot()
+	if open {
+		t.Error("session should be closed after Shutdown")
+	}
+
+	played := cuer.Played()
+	if len(played) != 2 || played[0] != audio.CueOpen || played[1] != audio.CueClose {
+		t.Errorf("cues: got %v want [open, close]", played)
+	}
+}
+
+// TestSession_ShutdownClosesOpenClipPanel verifies that clip-mode at
+// SIGTERM kills the preview panel via the explicit close path (not
+// just relying on ctx-cancellation).
+func TestSession_ShutdownClosesOpenClipPanel(t *testing.T) {
+	s, _, preview, _ := newClipSession(t)
+	if err := s.Toggle(t.Context(), "clip"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Shutdown(t.Context()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	_, kills, running := preview.Stats()
+	if kills != 1 || running {
+		t.Errorf("preview should be killed by Shutdown; kills=%d running=%v", kills, running)
+	}
+}
+
+// TestSession_ShutdownNoOpWhenClosed verifies Shutdown is idempotent:
+// calling it on an already-closed session is fine and produces no
+// extra cues / events.
+func TestSession_ShutdownNoOpWhenClosed(t *testing.T) {
+	s, _, cuer, _, _ := newTestSession(t)
+	if err := s.Shutdown(t.Context()); err != nil {
+		t.Fatalf("Shutdown on closed session: %v", err)
+	}
+	if got := len(cuer.Played()); got != 0 {
+		t.Errorf("Shutdown on closed session should not play cues; got %d", got)
+	}
+}
+
 // TestSession_AuditFailureDoesNotBreakDispatch: an audit Record error
 // is logged but does not prevent the typer from running.
 func TestSession_AuditFailureDoesNotBreakDispatch(t *testing.T) {

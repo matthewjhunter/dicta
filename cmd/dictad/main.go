@@ -270,5 +270,25 @@ func main() {
 		logger.Error("serve", "err", err)
 		os.Exit(1)
 	}
+
+	// Phase 12: signal-handling spec verification (§12 of design doc).
+	// SIGTERM cancels ctx, srv.Serve returns, and we land here. If a
+	// session was open at the time of the signal, close it explicitly
+	// so the audit log records the close, the close cue plays, and
+	// for clip-mode the preview panel receives an explicit SIGTERM via
+	// preview.Kill (idempotent with the cmd.Cancel path that has
+	// already fired on ctx cancellation).
+	//
+	// Use context.Background() here, NOT ctx — ctx is already done from
+	// the signal, and the cuer's Play would short-circuit through the
+	// ctx.Err() path without producing a tone. A fresh context lets the
+	// shutdown path complete its side effects.
+	if sess != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := sess.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("session.shutdown", "err", err)
+		}
+		shutdownCancel()
+	}
 	logger.Info("dictad stopped")
 }
