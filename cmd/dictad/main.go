@@ -21,6 +21,7 @@ import (
 	"github.com/matthewjhunter/dicta/internal/asr"
 	"github.com/matthewjhunter/dicta/internal/audio"
 	"github.com/matthewjhunter/dicta/internal/control"
+	"github.com/matthewjhunter/dicta/internal/whispersup"
 )
 
 const version = "0.1.0-dev"
@@ -32,6 +33,10 @@ func main() {
 	audioDeviceFlag := flag.String("audio-device", "", "audio source name (PipeWire node or pulse source); empty = system default")
 	asrBackendFlag := flag.String("asr-backend", "", "asr backend: wyoming | whispercpp | openai (empty = disabled)")
 	asrAddrFlag := flag.String("asr-wyoming-addr", "tcp://localhost:10300", "wyoming server address (host:port or tcp://host:port)")
+	whisperBinaryFlag := flag.String("whispercpp-binary", "/usr/local/bin/whisper-server", "whisper-server binary path (whispercpp backend)")
+	whisperModelFlag := flag.String("whispercpp-model", "", "whisper-server model path (whispercpp backend)")
+	whisperPortFlag := flag.Int("whispercpp-port", 0, "whisper-server bind port (0 = pick free ephemeral)")
+	whisperThreadsFlag := flag.Int("whispercpp-threads", 0, "whisper-server thread count (0 = auto)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -61,10 +66,42 @@ func main() {
 	}
 
 	if *asrBackendFlag != "" {
-		backend, err := asr.Select(asr.Config{
+		asrCfg := asr.Config{
 			Backend: *asrBackendFlag,
 			Wyoming: asr.WyomingConfig{Addr: *asrAddrFlag},
-		})
+		}
+
+		// whispercpp requires the supervisor to start whisper-server and
+		// hand its endpoint to asr.Select.
+		if *asrBackendFlag == "whispercpp" {
+			sup, err := whispersup.New(whispersup.Config{
+				Binary:    *whisperBinaryFlag,
+				ModelPath: *whisperModelFlag,
+				Port:      *whisperPortFlag,
+				Threads:   *whisperThreadsFlag,
+			}, logger)
+			if err != nil {
+				logger.Error("whispersup.new", "err", err)
+				os.Exit(1)
+			}
+			if err := sup.Start(ctx); err != nil {
+				logger.Error("whispersup.start", "err", err)
+				os.Exit(1)
+			}
+			defer sup.Stop()
+
+			waitCtx, waitCancel := context.WithTimeout(ctx, 60*time.Second)
+			if err := sup.WaitReady(waitCtx); err != nil {
+				waitCancel()
+				logger.Error("whispersup.wait_ready", "err", err, "last_err", sup.LastError())
+				os.Exit(1)
+			}
+			waitCancel()
+			asrCfg.WhisperCpp = asr.WhisperCppConfig{Endpoint: sup.Endpoint()}
+			logger.Info("whispersup ready", "endpoint", sup.Endpoint())
+		}
+
+		backend, err := asr.Select(asrCfg)
 		if err != nil {
 			logger.Error("asr.select", "err", err, "backend", *asrBackendFlag)
 			os.Exit(1)
@@ -82,7 +119,7 @@ func main() {
 		if audioMon != nil {
 			audioMon.onUtterance = asrMon.OnUtterance
 		}
-		logger.Info("asr-monitor started", "backend", *asrBackendFlag, "addr", *asrAddrFlag)
+		logger.Info("asr-monitor started", "backend", *asrBackendFlag)
 	}
 
 	if audioMon != nil {
