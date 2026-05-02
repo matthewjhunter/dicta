@@ -10,6 +10,7 @@ import (
 
 	"github.com/matthewjhunter/asrclient"
 	"github.com/matthewjhunter/dicta/internal/audio"
+	"github.com/matthewjhunter/dicta/internal/audit"
 	"github.com/matthewjhunter/dicta/internal/cleanup"
 	"github.com/matthewjhunter/dicta/internal/control"
 )
@@ -207,7 +208,7 @@ func newTestSession(t *testing.T) (*session, *fakeTyper, *fakeCuer, *resettableV
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
-	s := newSession(discardLogger(), typer, nil, cuer, asrMon, vad, nil, nil, nil, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, vad, nil, nil, nil, nil, t.Context())
 	return s, typer, cuer, vad, asrFake
 }
 
@@ -384,7 +385,7 @@ func TestSession_PublishesSessionStateOnOpenAndClose(t *testing.T) {
 	r := &recordingPush{}
 	bus.Subscribe([]string{"session_state"}, r.Push)
 
-	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, bus, nil, nil, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, bus, nil, nil, nil, t.Context())
 
 	if err := s.Toggle(t.Context(), "type"); err != nil {
 		t.Fatal(err)
@@ -441,7 +442,7 @@ func newClipSession(t *testing.T) (*session, *fakeClipper, *fakePreview, *fakeCu
 		BackendName:    "fake",
 		HealthInterval: time.Hour,
 	})
-	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, nil, preview, nil, t.Context())
+	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, nil, preview, nil, nil, t.Context())
 	return s, clipper, preview, cuer
 }
 
@@ -609,7 +610,7 @@ func TestSession_TypeModePublishesRawTranscript(t *testing.T) {
 	bus.Subscribe([]string{"transcript"}, r.Push)
 	cleaner := &fakeCleaner{result: "CLEANED-NEVER-USED"}
 
-	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, bus, nil, cleaner, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, bus, nil, cleaner, nil, t.Context())
 	if err := s.Toggle(t.Context(), "type"); err != nil {
 		t.Fatal(err)
 	}
@@ -669,7 +670,7 @@ func TestSession_ClipModePublishesCleanedTranscript(t *testing.T) {
 	bus.Subscribe([]string{"transcript"}, r.Push)
 	cleaner := &fakeCleaner{result: "I ate apples; they're delicious."}
 
-	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, bus, preview, cleaner, t.Context())
+	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, bus, preview, cleaner, nil, t.Context())
 	if err := s.Toggle(t.Context(), "clip"); err != nil {
 		t.Fatal(err)
 	}
@@ -729,7 +730,7 @@ func TestSession_ClipModeCleanupErrorFallsBackToRaw(t *testing.T) {
 	bus.Subscribe([]string{"transcript"}, r.Push)
 	cleaner := &fakeCleaner{err: errors.New("cleanup endpoint down")}
 
-	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, bus, preview, cleaner, t.Context())
+	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, bus, preview, cleaner, nil, t.Context())
 	if err := s.Toggle(t.Context(), "clip"); err != nil {
 		t.Fatal(err)
 	}
@@ -772,7 +773,7 @@ func TestSession_NilCleanerDefaultsToPassthrough(t *testing.T) {
 	r := &recordingPush{}
 	bus.Subscribe([]string{"transcript"}, r.Push)
 
-	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, bus, preview, nil, t.Context())
+	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, bus, preview, nil, nil, t.Context())
 	if err := s.Toggle(t.Context(), "clip"); err != nil {
 		t.Fatal(err)
 	}
@@ -813,5 +814,222 @@ func TestSession_NoBusNoPublishCrash(t *testing.T) {
 	}
 	if got := clipper.Calls(); len(got) != 0 {
 		t.Errorf("cancel should not Clip; got %v", got)
+	}
+}
+
+// fakeAudit records every Record call so tests can assert what made it
+// to the audit log. Mirrors the audit.Writer interface.
+type fakeAudit struct {
+	mu      sync.Mutex
+	records []audit.Record
+	err     error
+	closed  bool
+}
+
+func (f *fakeAudit) Record(rec audit.Record) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.records = append(f.records, rec)
+	return f.err
+}
+
+func (f *fakeAudit) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed = true
+	return nil
+}
+
+func (f *fakeAudit) Records() []audit.Record {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]audit.Record, len(f.records))
+	copy(out, f.records)
+	return out
+}
+
+// TestSession_TypeModeAuditRecord: type-mode utterance produces one
+// audit Record with mode=type, raw==cleaned, no cleanup latency, and
+// PCM populated.
+func TestSession_TypeModeAuditRecord(t *testing.T) {
+	typer := &fakeTyper{}
+	cuer := &fakeCuer{}
+	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "hello world", Language: "en"}}
+	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
+		BackendName:       "wyoming",
+		HealthInterval:    time.Hour,
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     2,
+	})
+	auditW := &fakeAudit{}
+
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, auditW, t.Context())
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatal(err)
+	}
+	pcm := make([]byte, 1280)
+	for i := range pcm {
+		pcm[i] = byte(i % 256)
+	}
+	s.OnUtterance(pcm)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(auditW.Records()) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	recs := auditW.Records()
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 audit record; got %d", len(recs))
+	}
+	r := recs[0]
+	if r.Mode != "type" {
+		t.Errorf("Mode: got %q want type", r.Mode)
+	}
+	if r.RawText != "hello world" {
+		t.Errorf("RawText: got %q", r.RawText)
+	}
+	if r.CleanedText != "hello world" {
+		t.Errorf("CleanedText (passthrough): got %q want %q", r.CleanedText, "hello world")
+	}
+	if r.CleanupLatencyMs != 0 {
+		t.Errorf("CleanupLatencyMs: got %d want 0 (cleanup not invoked in type-mode)", r.CleanupLatencyMs)
+	}
+	if r.Backend != "wyoming" {
+		t.Errorf("Backend: got %q want wyoming", r.Backend)
+	}
+	if r.Language != "en" {
+		t.Errorf("Language: got %q", r.Language)
+	}
+	if r.UtteranceID == "" {
+		t.Error("UtteranceID: want non-empty")
+	}
+	if len(r.PCM) != len(pcm) {
+		t.Errorf("PCM length: got %d want %d", len(r.PCM), len(pcm))
+	}
+	if r.Timestamp.IsZero() {
+		t.Error("Timestamp: want non-zero")
+	}
+}
+
+// TestSession_ClipModeAuditRecord: clip-mode utterance produces one
+// audit Record with raw and cleaned distinct, cleanup latency > 0.
+func TestSession_ClipModeAuditRecord(t *testing.T) {
+	typer := &fakeTyper{}
+	clipper := &fakeClipper{}
+	preview := &fakePreview{}
+	cuer := &fakeCuer{}
+	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "i ate apples there delicious"}}
+	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
+		BackendName:       "openai",
+		HealthInterval:    time.Hour,
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     2,
+	})
+	cleaner := &fakeCleaner{result: "I ate apples; they're delicious."}
+	auditW := &fakeAudit{}
+
+	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, nil, preview, cleaner, auditW, t.Context())
+	if err := s.Toggle(t.Context(), "clip"); err != nil {
+		t.Fatal(err)
+	}
+	s.OnUtterance(make([]byte, 1280))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(auditW.Records()) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	recs := auditW.Records()
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 audit record; got %d", len(recs))
+	}
+	r := recs[0]
+	if r.Mode != "clip" {
+		t.Errorf("Mode: got %q want clip", r.Mode)
+	}
+	if r.RawText != "i ate apples there delicious" {
+		t.Errorf("RawText: got %q", r.RawText)
+	}
+	if r.CleanedText != "I ate apples; they're delicious." {
+		t.Errorf("CleanedText: got %q", r.CleanedText)
+	}
+	if r.Backend != "openai" {
+		t.Errorf("Backend: got %q want openai", r.Backend)
+	}
+}
+
+// TestSession_AuditNotInvokedWhenSessionClosed: an utterance that
+// arrives mid-flight after the session closes must not produce an
+// audit record (the epoch gate must drop it before recordAudit).
+func TestSession_AuditNotInvokedAfterClose(t *testing.T) {
+	typer := &fakeTyper{}
+	cuer := &fakeCuer{}
+	asrFake := &fakeASR{
+		transcript:     asrclient.Transcript{Text: "hello"},
+		transcribeWait: 200 * time.Millisecond,
+	}
+	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
+		BackendName:       "fake",
+		HealthInterval:    time.Hour,
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     2,
+	})
+	auditW := &fakeAudit{}
+
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, auditW, t.Context())
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatal(err)
+	}
+	s.OnUtterance(make([]byte, 1280))
+
+	// Close before transcribe completes.
+	time.Sleep(50 * time.Millisecond)
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(400 * time.Millisecond)
+	if recs := auditW.Records(); len(recs) != 0 {
+		t.Errorf("expected no audit records (stale transcript dropped); got %v", recs)
+	}
+}
+
+// TestSession_AuditFailureDoesNotBreakDispatch: an audit Record error
+// is logged but does not prevent the typer from running.
+func TestSession_AuditFailureDoesNotBreakDispatch(t *testing.T) {
+	typer := &fakeTyper{}
+	cuer := &fakeCuer{}
+	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "hello"}}
+	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
+		BackendName:       "fake",
+		HealthInterval:    time.Hour,
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     2,
+	})
+	auditW := &fakeAudit{err: errors.New("disk full")}
+
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, auditW, t.Context())
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatal(err)
+	}
+	s.OnUtterance(make([]byte, 1280))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(typer.Calls()) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := typer.Calls(); len(got) != 1 || got[0] != "hello" {
+		t.Errorf("typer should have run despite audit failure; calls=%v", got)
 	}
 }

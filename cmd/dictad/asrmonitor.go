@@ -48,11 +48,21 @@ type asrMonitor struct {
 // transcriptResult is the payload the asrMonitor hands to the session
 // after a successful Transcribe. Carrying the utteranceID and language
 // alongside the text lets the session publish a complete TranscriptData
-// event without re-deriving them.
+// event without re-deriving them. Backend and ASRLatencyMs ride
+// through for the audit Record (§5.8).
+//
+// PCM is the original utterance bytes the audioMonitor captured. The
+// session passes the same buffer back to audit.Writer.Record so the
+// optional WAV write can use it; carrying it via transcriptResult
+// keeps the asrMonitor agnostic of audit (no audit dependency in
+// asrmonitor.go).
 type transcriptResult struct {
-	Text        string
-	UtteranceID string
-	Language    string
+	Text         string
+	UtteranceID  string
+	Language     string
+	Backend      string
+	ASRLatencyMs int64
+	PCM          []byte
 }
 
 type asrMonitorConfig struct {
@@ -173,9 +183,12 @@ func (m *asrMonitor) transcribe(pcm []byte, onTranscript func(transcriptResult))
 		"duration_ms", dur.Milliseconds())
 	if onTranscript != nil && text != "" {
 		onTranscript(transcriptResult{
-			Text:        text,
-			UtteranceID: uttID,
-			Language:    tr.Language,
+			Text:         text,
+			UtteranceID:  uttID,
+			Language:     tr.Language,
+			Backend:      m.cfg.BackendName,
+			ASRLatencyMs: dur.Milliseconds(),
+			PCM:          pcm,
 		})
 	}
 }

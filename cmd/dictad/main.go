@@ -20,6 +20,7 @@ import (
 
 	"github.com/matthewjhunter/dicta/internal/asr"
 	"github.com/matthewjhunter/dicta/internal/audio"
+	"github.com/matthewjhunter/dicta/internal/audit"
 	"github.com/matthewjhunter/dicta/internal/cleanup"
 	"github.com/matthewjhunter/dicta/internal/control"
 	"github.com/matthewjhunter/dicta/internal/dispatch"
@@ -57,6 +58,10 @@ func main() {
 	cleanupTimeoutFlag := flag.Duration("cleanup-timeout", 10*time.Second, "per-call timeout for cleanup HTTP requests")
 	cleanupMaxTokensFlag := flag.Int("cleanup-max-tokens", 2048, "max_tokens cap on cleanup responses")
 	cleanupTLSSkipFlag := flag.Bool("cleanup-tls-skip-verify", false, "DANGEROUS: skip TLS verification on the cleanup endpoint (testing only)")
+	auditEnabledFlag := flag.Bool("audit-enabled", false, "DEBUG: write per-utterance JSONL records to disk (default off; transcripts are sensitive)")
+	auditKeepAudioFlag := flag.Bool("audit-keep-audio", false, "DEBUG: also write per-utterance WAV captures (requires --audit-enabled; default off)")
+	auditDirectoryFlag := flag.String("audit-directory", "", "audit data directory (empty = $XDG_DATA_HOME/dicta)")
+	auditRetentionDaysFlag := flag.Int("audit-retention-days", 0, "delete audit day-dirs older than N days (0 = keep forever)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -212,7 +217,25 @@ func main() {
 			logger.Info("cleanup enabled", "endpoint", *cleanupEndpointFlag, "model", *cleanupModelFlag)
 		}
 
-		sess = newSession(logger, typer, clipper, cuer, handler.asr, audioMon.VAD(), bus, preview, cleaner, ctx)
+		auditW, err := audit.New(audit.Config{
+			Enabled:       *auditEnabledFlag,
+			Directory:     *auditDirectoryFlag,
+			KeepAudio:     *auditKeepAudioFlag,
+			RetentionDays: *auditRetentionDaysFlag,
+		}, logger)
+		if err != nil {
+			logger.Error("audit.new", "err", err)
+			os.Exit(1)
+		}
+		defer auditW.Close()
+		if *auditEnabledFlag {
+			logger.Warn("audit enabled — per-utterance transcripts will be written to disk",
+				"directory", *auditDirectoryFlag,
+				"keep_audio", *auditKeepAudioFlag,
+				"retention_days", *auditRetentionDaysFlag)
+		}
+
+		sess = newSession(logger, typer, clipper, cuer, handler.asr, audioMon.VAD(), bus, preview, cleaner, auditW, ctx)
 		audioMon.onUtterance = sess.OnUtterance
 		handler.session = sess
 		logger.Info("session orchestrator ready", "ydotool", *ydotoolBinaryFlag, "audio_cues", *audioCuesFlag)

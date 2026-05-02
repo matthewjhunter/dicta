@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/matthewjhunter/dicta/internal/audio"
+	"github.com/matthewjhunter/dicta/internal/audit"
 	"github.com/matthewjhunter/dicta/internal/cleanup"
 	"github.com/matthewjhunter/dicta/internal/control"
 	"github.com/matthewjhunter/dicta/internal/dispatch"
@@ -62,6 +64,7 @@ type session struct {
 	bus     *eventBus         // optional; nil = no event publish
 	preview previewController // optional; required for clip-mode
 	cleaner cleanup.Cleaner   // optional; nil = passthrough for both modes
+	auditW  audit.Writer      // optional; nil = no audit
 
 	// daemonCtx is the long-lived parent ctx for typer dispatch. We do
 	// NOT derive a per-session ctx here because cancelling a session
@@ -91,9 +94,12 @@ var ErrCommitOnlyValidInClipMode = fmt.Errorf("commit only valid while clip-mode
 // for the cancel command.
 var ErrCancelOnlyValidInClipMode = fmt.Errorf("cancel only valid while clip-mode session is open")
 
-func newSession(logger *slog.Logger, typer dispatch.Typer, clipper dispatch.Clipper, cuer audio.Cuer, asrMon *asrMonitor, vad audio.VAD, bus *eventBus, preview previewController, cleaner cleanup.Cleaner, daemonCtx context.Context) *session {
+func newSession(logger *slog.Logger, typer dispatch.Typer, clipper dispatch.Clipper, cuer audio.Cuer, asrMon *asrMonitor, vad audio.VAD, bus *eventBus, preview previewController, cleaner cleanup.Cleaner, auditW audit.Writer, daemonCtx context.Context) *session {
 	if cleaner == nil {
 		cleaner = cleanup.Passthrough()
+	}
+	if auditW == nil {
+		auditW = audit.Passthrough()
 	}
 	s := &session{
 		logger:    logger,
@@ -105,6 +111,7 @@ func newSession(logger *slog.Logger, typer dispatch.Typer, clipper dispatch.Clip
 		bus:       bus,
 		preview:   preview,
 		cleaner:   cleaner,
+		auditW:    auditW,
 		daemonCtx: daemonCtx,
 	}
 	if preview != nil {
@@ -339,35 +346,66 @@ func (s *session) OnUtterance(pcm []byte) {
 			return
 		}
 
+		var cleanupLatencyMs int64
+		var cleaned string
 		switch mode {
 		case modeType:
+			cleaned = tr.Text
 			s.publishTranscript(tr, tr.Text)
 			if err := s.typer.Type(s.daemonCtx, tr.Text); err != nil {
 				s.logger.Warn("session.type dispatch failed", "err", err)
 			}
 		case modeClip:
-			cleaned := s.runCleanup(tr.Text)
+			cleaned, cleanupLatencyMs = s.runCleanup(tr.Text)
 			s.publishTranscript(tr, cleaned)
 		}
+
+		s.recordAudit(mode, tr, cleaned, cleanupLatencyMs)
 	})
 }
 
 // runCleanup runs the mechanical profile on raw and returns the cleaned
-// text. The cleanup call is bounded by the cleaner's own timeout
-// (cleanup.Config.Timeout). On error we fall back to the raw transcript
-// with a WARN: the panel should still see *something* even if the
-// cleanup endpoint is down, and the user can fix punctuation by hand
-// before pressing Enter.
-func (s *session) runCleanup(raw string) string {
+// text along with the wall-clock latency in milliseconds. The cleanup
+// call is bounded by the cleaner's own timeout (cleanup.Config.Timeout).
+// On error we fall back to the raw transcript with a WARN: the panel
+// should still see *something* even if the cleanup endpoint is down,
+// and the user can fix punctuation by hand before pressing Enter.
+func (s *session) runCleanup(raw string) (string, int64) {
 	cleanCtx, cancel := context.WithCancel(s.daemonCtx)
 	defer cancel()
+	start := time.Now()
 	cleaned, err := s.cleaner.Clean(cleanCtx, raw, cleanup.ProfileMechanical)
+	latency := time.Since(start).Milliseconds()
 	if err != nil {
 		s.logger.Warn("session.cleanup failed; falling back to raw transcript",
 			"err", err, "raw_len", len(raw))
-		return raw
+		return raw, latency
 	}
-	return cleaned
+	return cleaned, latency
+}
+
+// recordAudit emits one audit Record per utterance. Failures are
+// logged at WARN level and ignored — audit must never disrupt
+// dictation. Passthrough writers no-op.
+func (s *session) recordAudit(mode sessionMode, tr transcriptResult, cleaned string, cleanupMs int64) {
+	if s.auditW == nil {
+		return
+	}
+	rec := audit.Record{
+		Timestamp:        time.Now(),
+		Mode:             mode.String(),
+		UtteranceID:      tr.UtteranceID,
+		Backend:          tr.Backend,
+		RawText:          tr.Text,
+		CleanedText:      cleaned,
+		Language:         tr.Language,
+		ASRLatencyMs:     tr.ASRLatencyMs,
+		CleanupLatencyMs: cleanupMs,
+		PCM:              tr.PCM,
+	}
+	if err := s.auditW.Record(rec); err != nil {
+		s.logger.Warn("session.audit_record failed", "err", err, "utterance_id", tr.UtteranceID)
+	}
 }
 
 // publishTranscript emits a transcript event to the bus. The text
