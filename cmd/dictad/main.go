@@ -62,6 +62,12 @@ func main() {
 	auditKeepAudioFlag := flag.Bool("audit-keep-audio", false, "DEBUG: also write per-utterance WAV captures (requires --audit-enabled; default off)")
 	auditDirectoryFlag := flag.String("audit-directory", "", "audit data directory (empty = $XDG_DATA_HOME/dicta)")
 	auditRetentionDaysFlag := flag.Int("audit-retention-days", 0, "delete audit day-dirs older than N days (0 = keep forever)")
+	vadCalibrateFlag := flag.Duration("vad-calibrate", 500*time.Millisecond, "VAD noise-floor calibration window at session open; raise if you tend to start speaking immediately")
+	vadHangoverFlag := flag.Duration("vad-hangover", 800*time.Millisecond, "VAD continuous-silence threshold to declare end-of-utterance")
+	vadMarginDBFlag := flag.Float64("vad-margin-db", 6, "VAD speech threshold = noise floor + this many dB; raise if ambient noise causes spurious speech detection")
+	vadMaxUtteranceFlag := flag.Duration("vad-max-utterance", 10*time.Second, "hard cap on a single utterance's duration; force-emits and starts a new chunk on overflow (0 disables)")
+	asrTranscribeTimeoutFlag := flag.Duration("asr-transcribe-timeout", 30*time.Second, "per-utterance Transcribe deadline; raise for slow CPUs / large models")
+	asrMaxConcurrentFlag := flag.Int("asr-max-concurrent", 2, "max concurrent in-flight Transcribe calls; utterances beyond this are dropped with a WARN")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -88,7 +94,17 @@ func main() {
 		audioMon = newAudioMonitor(logger, audio.CaptureConfig{
 			Backend: audio.CaptureBackend(*audioBackendFlag),
 			Device:  *audioDeviceFlag,
-		}, audio.VADConfig{})
+		}, audio.VADConfig{
+			Calibrate: *vadCalibrateFlag,
+			Hangover:  *vadHangoverFlag,
+			MarginDB:  *vadMarginDBFlag,
+		})
+		// 16 kHz mono int16 LE = 32 000 bytes / s. Convert the
+		// duration flag to a byte cap. 0s disables the cap.
+		if *vadMaxUtteranceFlag > 0 {
+			capBytes := int(vadMaxUtteranceFlag.Seconds() * float64(audio.SampleRateHz*audio.SampleWidth))
+			audioMon.SetMaxUtterance(capBytes)
+		}
 	}
 
 	if *asrBackendFlag != "" {
@@ -141,7 +157,8 @@ func main() {
 		asrMon := newASRMonitor(logger, backend, asrMonitorConfig{
 			BackendName:       *asrBackendFlag,
 			HealthInterval:    10 * time.Second,
-			TranscribeTimeout: 30 * time.Second,
+			TranscribeTimeout: *asrTranscribeTimeoutFlag,
+			MaxConcurrent:     *asrMaxConcurrentFlag,
 		})
 		asrMon.Start(ctx)
 		defer asrMon.Stop()
