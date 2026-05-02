@@ -84,10 +84,26 @@ func TestSelect_WhispercppOK(t *testing.T) {
 	}
 }
 
-func TestSelect_OpenAINotImplemented(t *testing.T) {
+func TestSelect_OpenAIRequiresKey(t *testing.T) {
 	_, err := Select(Config{Backend: "openai"})
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Errorf("got %v, want ErrNotImplemented", err)
+	if !errors.Is(err, ErrOpenAIKeyMissing) {
+		t.Errorf("got %v, want ErrOpenAIKeyMissing", err)
+	}
+}
+
+func TestSelect_OpenAIOK(t *testing.T) {
+	b, err := Select(Config{
+		Backend: "openai",
+		OpenAI:  OpenAIConfig{APIKey: "sk-test"},
+	})
+	if err != nil {
+		t.Fatalf("Select openai: %v", err)
+	}
+	if b == nil {
+		t.Fatal("backend nil")
+	}
+	if _, ok := b.(*retryBackend); !ok {
+		t.Fatalf("expected *retryBackend, got %T", b)
 	}
 }
 

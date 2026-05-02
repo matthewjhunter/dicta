@@ -3,9 +3,13 @@ package asr
 import (
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/url"
+	"os"
 	"strings"
 
 	"github.com/matthewjhunter/asrclient"
+	"github.com/matthewjhunter/asrclient/openai"
 	"github.com/matthewjhunter/asrclient/whispercpp"
 	"github.com/matthewjhunter/asrclient/wyoming"
 )
@@ -14,9 +18,11 @@ import (
 // the v1 backends.
 var ErrUnknownBackend = errors.New("unknown asr backend")
 
-// ErrNotImplemented is returned for backends whose implementation is
-// deferred to a later phase. wyoming is phase-4; whispercpp is phase-5;
-// openai is phase-6.
+// ErrNotImplemented is reserved for backends whose implementation has
+// not yet landed. As of phase 6 all three v1 backends (wyoming,
+// whispercpp, openai) are implemented; this sentinel survives so
+// callers can still distinguish "config asked for a backend we don't
+// have" from "your config is wrong" once future backends arrive.
 var ErrNotImplemented = errors.New("asr backend not implemented in this phase")
 
 // Backend is the (re-exported) asrclient interface. Calling code outside
@@ -45,12 +51,74 @@ func Select(cfg Config) (Backend, error) {
 	case "whispercpp":
 		return selectWhisperCpp(cfg.WhisperCpp)
 	case "openai":
-		return nil, fmt.Errorf("%w: openai lands in phase 6", ErrNotImplemented)
+		return selectOpenAI(cfg.OpenAI)
 	case "":
 		return nil, fmt.Errorf("%w: empty backend", ErrUnknownBackend)
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnknownBackend, cfg.Backend)
 	}
+}
+
+// ErrOpenAIKeyMissing is returned when no API key can be resolved for
+// the openai backend. v1 rejects anonymous traffic to avoid silent
+// regressions when an env var is unset.
+var ErrOpenAIKeyMissing = errors.New("openai: no API key (set APIKey or APIKeyEnv)")
+
+func selectOpenAI(cfg OpenAIConfig) (Backend, error) {
+	cfg = cfg.withDefaults()
+
+	apiKey := cfg.APIKey
+	if apiKey == "" && cfg.APIKeyEnv != "" {
+		apiKey = os.Getenv(cfg.APIKeyEnv)
+	}
+	if apiKey == "" {
+		return nil, ErrOpenAIKeyMissing
+	}
+
+	endpoint := cfg.Endpoint
+	if endpoint == "" {
+		endpoint = openai.DefaultEndpoint
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("openai: parse endpoint %q: %w", endpoint, err)
+	}
+	switch u.Scheme {
+	case "https":
+		// fine
+	case "http":
+		// http endpoints leak the bearer token in cleartext; warn loudly.
+		slog.Default().Warn("asr.openai endpoint uses http:// — API key will be sent in cleartext",
+			"endpoint", endpoint,
+			"guidance", "use https:// for any non-loopback target")
+	default:
+		return nil, fmt.Errorf("openai: unsupported endpoint scheme %q (want http or https)", u.Scheme)
+	}
+
+	if cfg.InsecureSkipTLSVerify {
+		// §8: tls_verify = false is testing-only and must emit a startup WARN.
+		slog.Default().Warn("asr.openai TLS certificate verification is DISABLED (tls_verify=false)",
+			"endpoint", endpoint,
+			"guidance", "remove tls_verify=false for any production / non-LAN target")
+	}
+
+	opts := []openai.Option{openai.WithEndpoint(endpoint)}
+	if cfg.Model != "" {
+		opts = append(opts, openai.WithModel(cfg.Model))
+	}
+	if cfg.Timeout > 0 {
+		opts = append(opts, openai.WithTimeout(cfg.Timeout))
+	}
+	if cfg.InsecureSkipTLSVerify {
+		opts = append(opts, openai.WithTLSInsecureSkipVerify())
+	}
+	inner := openai.NewClient(apiKey, opts...)
+
+	return newRetryBackend(inner, retryConfig{
+		Initial:     cfg.ReconnectBackoffInitial,
+		Max:         cfg.ReconnectBackoffMax,
+		MaxAttempts: cfg.MaxAttempts,
+	}), nil
 }
 
 func selectWhisperCpp(cfg WhisperCppConfig) (Backend, error) {

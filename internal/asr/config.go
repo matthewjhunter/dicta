@@ -54,9 +54,37 @@ func (w WhisperCppConfig) withDefaults() WhisperCppConfig {
 	return w
 }
 
-// OpenAIConfig is a placeholder; phase 6 fills it in.
+// OpenAIConfig parameterizes the asrclient/openai.Client. The API key
+// is sourced in priority order: explicit APIKey field, then the env
+// var named by APIKeyEnv. Selecting "openai" with neither set is an
+// error — anonymous traffic is unsupported in v1 to avoid silent
+// regressions if someone forgets to set the env var.
+//
+// Endpoint and Model default to the asrclient/openai package defaults
+// (https://api.openai.com/v1/audio/transcriptions and whisper-1).
+//
+// InsecureSkipTLSVerify is the testing-only knob mapped from the TOML
+// `tls_verify = false`. Selecting it emits a startup WARN (§8). The
+// zero value is always safe: TLS verification is on.
 type OpenAIConfig struct {
-	APIKey   string
-	Endpoint string
-	Model    string
+	APIKey                string
+	APIKeyEnv             string
+	Endpoint              string
+	Model                 string
+	Timeout               time.Duration // 0 = asrclient default (30 s)
+	InsecureSkipTLSVerify bool
+
+	ReconnectBackoffInitial time.Duration // 0 = 1 s
+	ReconnectBackoffMax     time.Duration // 0 = 30 s
+	MaxAttempts             int           // 0 = retry until ctx ends
+}
+
+func (o OpenAIConfig) withDefaults() OpenAIConfig {
+	if o.ReconnectBackoffInitial == 0 {
+		o.ReconnectBackoffInitial = time.Second
+	}
+	if o.ReconnectBackoffMax == 0 {
+		o.ReconnectBackoffMax = 30 * time.Second
+	}
+	return o
 }
