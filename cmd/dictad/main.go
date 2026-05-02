@@ -65,7 +65,8 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	handler := &stubHandler{version: version}
+	bus := newEventBus(logger)
+	handler := &stubHandler{version: version, bus: bus}
 
 	var audioMon *audioMonitor
 	if *audioMonitorFlag {
@@ -127,6 +128,7 @@ func main() {
 			HealthInterval:    10 * time.Second,
 			TranscribeTimeout: 30 * time.Second,
 		})
+		asrMon.SetEventBus(bus)
 		asrMon.Start(ctx)
 		defer asrMon.Stop()
 		defer backend.Close()
@@ -154,7 +156,7 @@ func main() {
 		var cuer audio.Cuer = audio.NewSubprocessCuer(audio.CueConfig{
 			Disabled: !*audioCuesFlag,
 		})
-		sess = newSession(logger, typer, cuer, handler.asr, audioMon.VAD(), ctx)
+		sess = newSession(logger, typer, cuer, handler.asr, audioMon.VAD(), bus, ctx)
 		audioMon.onUtterance = sess.OnUtterance
 		handler.session = sess
 		logger.Info("session orchestrator ready", "ydotool", *ydotoolBinaryFlag, "audio_cues", *audioCuesFlag)

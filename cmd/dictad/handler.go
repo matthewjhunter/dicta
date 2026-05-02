@@ -18,6 +18,7 @@ type stubHandler struct {
 	audio   *audioMonitor
 	asr     *asrMonitor
 	session *session
+	bus     *eventBus
 }
 
 func (h *stubHandler) Status(ctx context.Context) (control.StatusInfo, error) {
@@ -62,7 +63,11 @@ func (h *stubHandler) MicSelect(ctx context.Context, name string, reset bool) er
 }
 
 func (h *stubHandler) Subscribe(ctx context.Context, events []string, push control.EventPush) error {
-	return control.ErrNotImplemented
+	if h.bus == nil {
+		return control.ErrNotImplemented
+	}
+	h.bus.Subscribe(events, push)
+	return nil
 }
 
 func (h *stubHandler) Shutdown(ctx context.Context) error {

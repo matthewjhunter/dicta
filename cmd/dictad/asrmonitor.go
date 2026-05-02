@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -39,6 +40,15 @@ type asrMonitor struct {
 	// inflight bounds concurrent Transcribe calls so a backend hang
 	// can't pile up goroutines.
 	inflight chan struct{}
+
+	// bus is the daemon-side event broadcaster (phase 8). Optional —
+	// nil bus means transcripts are not published, only logged.
+	bus *eventBus
+
+	// utteranceSeq is the monotonic counter used to assign IDs to
+	// each utterance. Combined with the unix timestamp at submit time
+	// it produces a sortable, unique-per-daemon-restart string.
+	utteranceSeq atomic.Uint64
 }
 
 type asrMonitorConfig struct {
@@ -77,6 +87,10 @@ func newASRMonitor(logger *slog.Logger, backend asr.Backend, cfg asrMonitorConfi
 	m.health.Store("unknown")
 	return m
 }
+
+// SetEventBus wires an event bus so each successful transcription is
+// published as a "transcript" event. Nil unsubscribes (no-op publish).
+func (m *asrMonitor) SetEventBus(b *eventBus) { m.bus = b }
 
 // Start launches the health-poll goroutine. Stop or ctx cancellation
 // halts polling; in-flight Transcribe calls continue to completion since
@@ -149,11 +163,24 @@ func (m *asrMonitor) transcribe(pcm []byte, onTranscript func(text string)) {
 	text := strings.TrimSpace(tr.Text)
 	m.transcripts.Add(1)
 	m.lastTranscript.Store(text)
+	uttID := fmt.Sprintf("u%d-%d", start.Unix(), m.utteranceSeq.Add(1))
 	m.logger.Info("asr.transcript",
 		"text", text,
 		"language", tr.Language,
+		"utterance_id", uttID,
 		"audio_ms", int(time.Duration(len(pcm))/time.Duration(2*16)),
 		"duration_ms", dur.Milliseconds())
+	if m.bus != nil && text != "" {
+		m.bus.Publish(control.Event{
+			Event: "transcript",
+			Data: control.TranscriptData{
+				Text:        text,
+				Final:       true,
+				UtteranceID: uttID,
+				Language:    tr.Language,
+			},
+		})
+	}
 	if onTranscript != nil && text != "" {
 		onTranscript(text)
 	}

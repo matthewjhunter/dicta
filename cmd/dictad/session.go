@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/matthewjhunter/dicta/internal/audio"
+	"github.com/matthewjhunter/dicta/internal/control"
 	"github.com/matthewjhunter/dicta/internal/dispatch"
 )
 
@@ -56,6 +57,7 @@ type session struct {
 	cuer   audio.Cuer
 	asrMon *asrMonitor
 	vad    audio.VAD // optional: Reset() called on session-open if non-nil
+	bus    *eventBus // optional; nil = no event publish
 
 	// daemonCtx is the long-lived parent ctx for typer dispatch. We do
 	// NOT derive a per-session ctx here because cancelling a session
@@ -74,13 +76,14 @@ type session struct {
 // requested in v1 (phase 9 lights this up).
 var ErrClipNotImplemented = fmt.Errorf("clip-mode is not yet implemented (phase 9)")
 
-func newSession(logger *slog.Logger, typer dispatch.Typer, cuer audio.Cuer, asrMon *asrMonitor, vad audio.VAD, daemonCtx context.Context) *session {
+func newSession(logger *slog.Logger, typer dispatch.Typer, cuer audio.Cuer, asrMon *asrMonitor, vad audio.VAD, bus *eventBus, daemonCtx context.Context) *session {
 	return &session{
 		logger:    logger,
 		typer:     typer,
 		cuer:      cuer,
 		asrMon:    asrMon,
 		vad:       vad,
+		bus:       bus,
 		daemonCtx: daemonCtx,
 	}
 }
@@ -147,6 +150,7 @@ func (s *session) open_(ctx context.Context, mode sessionMode) error {
 	}
 
 	s.logger.Info("session.open", "mode", mode.String(), "epoch", epoch)
+	s.publishState(mode, true)
 
 	if s.cuer != nil {
 		if err := s.cuer.Play(ctx, audio.CueOpen); err != nil {
@@ -174,6 +178,7 @@ func (s *session) close(ctx context.Context, reason string) error {
 	s.mu.Unlock()
 
 	s.logger.Info("session.close", "previous_mode", prevMode.String(), "reason", reason, "epoch", epoch)
+	s.publishState(modeNone, false)
 
 	if s.cuer != nil {
 		if err := s.cuer.Play(ctx, audio.CueClose); err != nil {
@@ -181,6 +186,19 @@ func (s *session) close(ctx context.Context, reason string) error {
 		}
 	}
 	return nil
+}
+
+// publishState emits a session_state event on the bus. Calls without a
+// bus configured are silent no-ops, which keeps tests that don't care
+// about event plumbing simple.
+func (s *session) publishState(mode sessionMode, open bool) {
+	if s.bus == nil {
+		return
+	}
+	s.bus.Publish(control.Event{
+		Event: "session_state",
+		Data:  control.SessionStateData{Mode: mode.String(), Open: open},
+	})
 }
 
 // OnUtterance is the audioMonitor hook. If no session is open, drop.

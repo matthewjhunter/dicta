@@ -9,6 +9,7 @@ import (
 
 	"github.com/matthewjhunter/asrclient"
 	"github.com/matthewjhunter/dicta/internal/audio"
+	"github.com/matthewjhunter/dicta/internal/control"
 )
 
 // fakeTyper records every Type call so tests can assert what made it
@@ -88,7 +89,7 @@ func newTestSession(t *testing.T) (*session, *fakeTyper, *fakeCuer, *resettableV
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
-	s := newSession(discardLogger(), typer, cuer, asrMon, vad, t.Context())
+	s := newSession(discardLogger(), typer, cuer, asrMon, vad, nil, t.Context())
 	return s, typer, cuer, vad, asrFake
 }
 
@@ -247,6 +248,42 @@ func TestSession_SecondOpenIsIdempotentOnSameMode(t *testing.T) {
 	// Cues: open + close == 2.
 	if got := len(cuer.Played()); got != 2 {
 		t.Errorf("cues: got %d want 2", got)
+	}
+}
+
+func TestSession_PublishesSessionStateOnOpenAndClose(t *testing.T) {
+	// Build a session wired to an eventBus and verify the events.
+	typer := &fakeTyper{}
+	cuer := &fakeCuer{}
+	asrFake := &fakeASR{}
+	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
+		BackendName:    "fake",
+		HealthInterval: time.Hour,
+	})
+	bus := newEventBus(discardLogger())
+	r := &recordingPush{}
+	bus.Subscribe([]string{"session_state"}, r.Push)
+
+	s := newSession(discardLogger(), typer, cuer, asrMon, &resettableVAD{}, bus, t.Context())
+
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := r.Events()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 session_state events; got %d (%+v)", len(got), got)
+	}
+	open := got[0].Data.(control.SessionStateData)
+	closed := got[1].Data.(control.SessionStateData)
+	if !(open.Mode == "type" && open.Open) {
+		t.Errorf("first event: got %+v want {type, true}", open)
+	}
+	if !(closed.Mode == "none" && !closed.Open) {
+		t.Errorf("second event: got %+v want {none, false}", closed)
 	}
 }
 
