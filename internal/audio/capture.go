@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -91,6 +92,19 @@ func (c *SubprocessCapture) Start(ctx context.Context) (<-chan Frame, error) {
 	subCtx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(subCtx, name, args...)
 	cmd.Stderr = nil // discard subprocess stderr for now; phase 11 (audit) wires this up
+	// Put the subprocess in its own process group so we can kill the
+	// whole group on cancel — important for shell-pipeline-style
+	// stubs in tests, and a defense-in-depth for any future wrapper
+	// scripts shipped around pw-record/parec.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		// Negative PID targets the whole process group.
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 2 * time.Second
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
