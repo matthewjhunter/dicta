@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"go.uber.org/goleak"
 )
 
 // TestMain doubles as the test stub binary. The supervisor's Binary
@@ -17,14 +19,21 @@ import (
 // parses the same -m / --host / --port flags whisper-server would
 // accept and runs a tiny HTTP listener so the readiness probe and
 // crash-restart paths can be exercised hermetically.
+//
+// In test-mode (no stub env var), wrap m.Run with goleak so any
+// supervisor goroutine that survives a test surfaces as a leak.
 func TestMain(m *testing.M) {
-	if os.Getenv("DICTA_WHISPERSUP_STUB") == "" {
-		os.Exit(m.Run())
+	if os.Getenv("DICTA_WHISPERSUP_STUB") != "" {
+		if err := runStubServer(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
 	}
-	if err := runStubServer(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	// goleak.IgnoreAnyFunction("net/http.(*Server).Serve") could relax
+	// this if the stub HTTP server ever leaks across test boundaries —
+	// for now keep strict and let real leaks surface.
+	goleak.VerifyTestMain(m)
 }
 
 func runStubServer() error {

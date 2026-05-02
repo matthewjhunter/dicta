@@ -4,6 +4,8 @@ go 1.25.0
 
 require github.com/matthewjhunter/asrclient v0.0.0-00010101000000-000000000000
 
+require go.uber.org/goleak v1.3.0 // indirect
+
 require (
 	gioui.org v0.9.0
 	gioui.org/shader v1.0.8 // indirect
