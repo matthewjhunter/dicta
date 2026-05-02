@@ -1,0 +1,16 @@
+/dictad
+/dicta
+/dicta-preview
+/bin/
+/dist/
+/.task/
+
+*.test
+*.out
+coverage.txt
+
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store

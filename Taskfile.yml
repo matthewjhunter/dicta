@@ -1,0 +1,83 @@
+version: '3'
+
+# D13 — daemon and CLI must build with CGO_ENABLED=0 to keep the pure-Go
+# invariant (and keep MemoryDenyWriteExecute=true viable in the systemd
+# unit). The race detector requires CGo, so test:race overrides this.
+
+env:
+  CGO_ENABLED: '0'
+
+vars:
+  VERSION: '{{.VERSION | default "0.1.0-dev"}}'
+  LDFLAGS: -s -w
+  BIN: bin
+
+tasks:
+  default:
+    desc: Show available tasks.
+    cmds:
+      - task --list
+
+  build:
+    desc: Build dictad and dicta (pure Go, static).
+    deps: [dictad, dicta]
+
+  dictad:
+    desc: Build the dictad daemon.
+    cmds:
+      - mkdir -p {{.BIN}}
+      - go build -ldflags='{{.LDFLAGS}}' -o {{.BIN}}/dictad ./cmd/dictad
+    sources:
+      - cmd/dictad/**/*.go
+      - internal/**/*.go
+      - go.mod
+      - go.sum
+    generates:
+      - '{{.BIN}}/dictad'
+
+  dicta:
+    desc: Build the dicta CLI.
+    cmds:
+      - mkdir -p {{.BIN}}
+      - go build -ldflags='{{.LDFLAGS}}' -o {{.BIN}}/dicta ./cmd/dicta
+    sources:
+      - cmd/dicta/**/*.go
+      - internal/**/*.go
+      - go.mod
+      - go.sum
+    generates:
+      - '{{.BIN}}/dicta'
+
+  test:
+    desc: Run unit tests.
+    cmds:
+      - go test ./...
+
+  test:race:
+    desc: Run tests with the race detector (requires CGo).
+    env:
+      CGO_ENABLED: '1'
+    cmds:
+      - go test -race ./...
+
+  vet:
+    desc: Run go vet on all packages.
+    cmds:
+      - go vet ./...
+
+  tidy:
+    desc: Run go mod tidy.
+    cmds:
+      - go mod tidy
+
+  clean:
+    desc: Remove build artifacts.
+    cmds:
+      - rm -rf {{.BIN}}
+
+  check:
+    desc: Run vet, tests, and race-tests in one shot.
+    cmds:
+      - task: vet
+      - task: test
+      - task: test:race
