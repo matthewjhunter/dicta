@@ -1,0 +1,43 @@
+[Unit]
+Description=dicta voice dictation daemon
+Documentation=https://github.com/matthewjhunter/dicta
+After=graphical-session.target pipewire.service
+Wants=pipewire.service
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/dictad
+Restart=on-failure
+RestartSec=3
+
+# Hardening (§7.1, §8)
+#
+# MemoryDenyWriteExecute relies on dictad being pure Go (D13). Anything
+# that introduces CGo, an embedded interpreter, or a JIT into the daemon
+# breaks this flag and the hardening posture goes with it.
+#
+# ProtectHome=read-only + ReadWritePaths=%h/.local/share/dicta lets the
+# audit writer create JSONL/WAV files (when --audit-enabled) while
+# blocking writes anywhere else under $HOME.
+#
+# RestrictAddressFamilies allows AF_UNIX (control socket, ydotoold,
+# PipeWire), AF_INET / AF_INET6 (Wyoming + OpenAI ASR, cleanup HTTP).
+# AF_NETLINK and friends are not needed.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/dicta %t
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=default.target
