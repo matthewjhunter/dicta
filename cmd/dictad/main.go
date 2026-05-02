@@ -20,6 +20,7 @@ import (
 
 	"github.com/matthewjhunter/dicta/internal/asr"
 	"github.com/matthewjhunter/dicta/internal/audio"
+	"github.com/matthewjhunter/dicta/internal/cleanup"
 	"github.com/matthewjhunter/dicta/internal/control"
 	"github.com/matthewjhunter/dicta/internal/dispatch"
 	"github.com/matthewjhunter/dicta/internal/whispersup"
@@ -49,6 +50,13 @@ func main() {
 	audioCuesFlag := flag.Bool("audio-cues", true, "play short tones on session open/close")
 	wlCopyBinaryFlag := flag.String("wl-copy-binary", "/usr/bin/wl-copy", "wl-copy binary path (clip-mode commit)")
 	previewBinaryFlag := flag.String("preview-binary", "", "dicta-preview binary path (empty = clip-mode disabled)")
+	cleanupEnabledFlag := flag.Bool("cleanup-enabled", false, "enable LLM cleanup of clip-mode transcripts (default off; v1 ships disabled)")
+	cleanupEndpointFlag := flag.String("cleanup-endpoint", "", "OpenAI-protocol base URL for cleanup (e.g. http://strix-halo.lan:8080/v1)")
+	cleanupKeyEnvFlag := flag.String("cleanup-api-key-env", "DICTA_LLM_KEY", "env var holding the cleanup bearer token (empty = no auth header)")
+	cleanupModelFlag := flag.String("cleanup-model", "", "cleanup model name (e.g. qwen3-7b-instruct); required when --cleanup-enabled")
+	cleanupTimeoutFlag := flag.Duration("cleanup-timeout", 10*time.Second, "per-call timeout for cleanup HTTP requests")
+	cleanupMaxTokensFlag := flag.Int("cleanup-max-tokens", 2048, "max_tokens cap on cleanup responses")
+	cleanupTLSSkipFlag := flag.Bool("cleanup-tls-skip-verify", false, "DANGEROUS: skip TLS verification on the cleanup endpoint (testing only)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -187,7 +195,24 @@ func main() {
 			logger.Info("clip-mode enabled", "preview", *previewBinaryFlag, "wl_copy", *wlCopyBinaryFlag)
 		}
 
-		sess = newSession(logger, typer, clipper, cuer, handler.asr, audioMon.VAD(), bus, preview, nil /* cleaner: phase 10 wires this next */, ctx)
+		cleaner, err := cleanup.New(cleanup.Config{
+			Enabled:               *cleanupEnabledFlag,
+			Endpoint:              *cleanupEndpointFlag,
+			APIKeyEnv:             *cleanupKeyEnvFlag,
+			Model:                 *cleanupModelFlag,
+			Timeout:               *cleanupTimeoutFlag,
+			MaxTokens:             *cleanupMaxTokensFlag,
+			InsecureSkipTLSVerify: *cleanupTLSSkipFlag,
+		}, logger)
+		if err != nil {
+			logger.Error("cleanup.new", "err", err)
+			os.Exit(1)
+		}
+		if *cleanupEnabledFlag {
+			logger.Info("cleanup enabled", "endpoint", *cleanupEndpointFlag, "model", *cleanupModelFlag)
+		}
+
+		sess = newSession(logger, typer, clipper, cuer, handler.asr, audioMon.VAD(), bus, preview, cleaner, ctx)
 		audioMon.onUtterance = sess.OnUtterance
 		handler.session = sess
 		logger.Info("session orchestrator ready", "ydotool", *ydotoolBinaryFlag, "audio_cues", *audioCuesFlag)
