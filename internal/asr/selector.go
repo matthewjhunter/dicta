@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/matthewjhunter/asrclient"
+	"github.com/matthewjhunter/asrclient/whispercpp"
 	"github.com/matthewjhunter/asrclient/wyoming"
 )
 
@@ -33,12 +34,16 @@ type Transcript = asrclient.Transcript
 // retry-wrapped where applicable: transport errors trigger
 // exponential-backoff retries until the context ends or the configured
 // MaxAttempts cap is reached.
+//
+// For whispercpp, the caller (dictad) is responsible for starting the
+// whisper-server supervisor and populating cfg.WhisperCpp.Endpoint
+// before calling Select — this package never spawns subprocesses.
 func Select(cfg Config) (Backend, error) {
 	switch strings.ToLower(cfg.Backend) {
 	case "wyoming":
 		return selectWyoming(cfg.Wyoming)
 	case "whispercpp":
-		return nil, fmt.Errorf("%w: whispercpp lands in phase 5", ErrNotImplemented)
+		return selectWhisperCpp(cfg.WhisperCpp)
 	case "openai":
 		return nil, fmt.Errorf("%w: openai lands in phase 6", ErrNotImplemented)
 	case "":
@@ -46,6 +51,19 @@ func Select(cfg Config) (Backend, error) {
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnknownBackend, cfg.Backend)
 	}
+}
+
+func selectWhisperCpp(cfg WhisperCppConfig) (Backend, error) {
+	cfg = cfg.withDefaults()
+	if cfg.Endpoint == "" {
+		return nil, errors.New("whispercpp: Endpoint is empty (supervisor must report ready before Select)")
+	}
+	inner := whispercpp.NewClient(whispercpp.WithEndpoint(cfg.Endpoint))
+	return newRetryBackend(inner, retryConfig{
+		Initial:     cfg.ReconnectBackoffInitial,
+		Max:         cfg.ReconnectBackoffMax,
+		MaxAttempts: cfg.MaxAttempts,
+	}), nil
 }
 
 func selectWyoming(cfg WyomingConfig) (Backend, error) {

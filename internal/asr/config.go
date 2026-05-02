@@ -33,9 +33,25 @@ func (w WyomingConfig) withDefaults() WyomingConfig {
 	return w
 }
 
-// WhisperCppConfig is a placeholder; phase 5 fills it in.
+// WhisperCppConfig parameterizes the asrclient/whispercpp.Client and
+// the retry wrapper around it. Endpoint is populated by the
+// whispersup supervisor once whisper-server is up; dictad's main
+// blocks on supervisor.WaitReady before calling Select.
 type WhisperCppConfig struct {
-	Endpoint string // populated by the supervisor once whisper-server is up
+	Endpoint                string        // http://host:port/v1/audio/transcriptions
+	ReconnectBackoffInitial time.Duration // 0 = 1 s
+	ReconnectBackoffMax     time.Duration // 0 = 30 s
+	MaxAttempts             int           // 0 = retry until ctx ends
+}
+
+func (w WhisperCppConfig) withDefaults() WhisperCppConfig {
+	if w.ReconnectBackoffInitial == 0 {
+		w.ReconnectBackoffInitial = time.Second
+	}
+	if w.ReconnectBackoffMax == 0 {
+		w.ReconnectBackoffMax = 30 * time.Second
+	}
+	return w
 }
 
 // OpenAIConfig is a placeholder; phase 6 fills it in.

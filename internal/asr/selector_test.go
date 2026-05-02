@@ -2,6 +2,7 @@ package asr
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/matthewjhunter/asrclient/wyoming"
@@ -57,10 +58,29 @@ func TestSelect_WyomingRejectsEmptyAddr(t *testing.T) {
 	}
 }
 
-func TestSelect_WhispercppNotImplemented(t *testing.T) {
+func TestSelect_WhispercppRequiresEndpoint(t *testing.T) {
 	_, err := Select(Config{Backend: "whispercpp"})
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Errorf("got %v, want ErrNotImplemented", err)
+	if err == nil {
+		t.Fatal("expected error when Endpoint is empty")
+	}
+	if !strings.Contains(err.Error(), "Endpoint is empty") {
+		t.Errorf("error should explain endpoint requirement: %v", err)
+	}
+}
+
+func TestSelect_WhispercppOK(t *testing.T) {
+	b, err := Select(Config{
+		Backend:    "whispercpp",
+		WhisperCpp: WhisperCppConfig{Endpoint: "http://127.0.0.1:9000/v1/audio/transcriptions"},
+	})
+	if err != nil {
+		t.Fatalf("Select whispercpp: %v", err)
+	}
+	if b == nil {
+		t.Fatal("backend nil")
+	}
+	if _, ok := b.(*retryBackend); !ok {
+		t.Fatalf("expected *retryBackend, got %T", b)
 	}
 }
 
