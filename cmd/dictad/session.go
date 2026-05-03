@@ -77,6 +77,12 @@ type session struct {
 	mode  sessionMode
 	open  bool
 	epoch uint64
+	// typedInSession counts successful type-mode dispatches in the
+	// currently-open session. The second utterance and beyond get a
+	// leading space prepended so consecutive transcripts don't collide
+	// at sentence boundaries (e.g. "Hello." + "World." -> "Hello. World.").
+	// Reset on every open_().
+	typedInSession uint64
 }
 
 // ErrClipNotConfigured is returned when a clip-mode toggle fires but
@@ -180,6 +186,7 @@ func (s *session) open_(ctx context.Context, mode sessionMode) error {
 	s.epoch++
 	s.mode = mode
 	s.open = true
+	s.typedInSession = 0
 	epoch := s.epoch
 	s.mu.Unlock()
 
@@ -368,8 +375,18 @@ func (s *session) OnUtterance(pcm []byte) {
 		case modeType:
 			cleaned = tr.Text
 			s.publishTranscript(tr, tr.Text)
-			if err := s.typer.Type(s.daemonCtx, tr.Text); err != nil {
+			s.mu.Lock()
+			typed := tr.Text
+			if s.typedInSession > 0 {
+				typed = " " + tr.Text
+			}
+			s.mu.Unlock()
+			if err := s.typer.Type(s.daemonCtx, typed); err != nil {
 				s.logger.Warn("session.type dispatch failed", "err", err)
+			} else {
+				s.mu.Lock()
+				s.typedInSession++
+				s.mu.Unlock()
 			}
 		case modeClip:
 			cleaned, cleanupLatencyMs = s.runCleanup(tr.Text)
