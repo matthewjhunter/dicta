@@ -110,6 +110,11 @@ func TestClipper_BadExitSurfacedAsError(t *testing.T) {
 func TestClipper_ContextCancelSurfaced(t *testing.T) {
 	cfg, _ := stubClipperConfig(t)
 	cfg.InvokeTimeout = time.Hour // leave the kill to ctx
+	// Stub drains stdin in <1ms, so without a block hook the cancel
+	// goroutine races and finds the process already gone. 500ms is plenty
+	// for a 10ms-delayed cancel even on a loaded CI runner; if cancel
+	// silently fails to fire, the test bounds at 500ms instead of 1h.
+	t.Setenv("DICTA_DISPATCH_STUB_BLOCK_MS", "500")
 	c, _ := NewSubprocessClipper(cfg)
 
 	ctx, cancel := context.WithCancel(t.Context())

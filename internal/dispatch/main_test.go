@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // TestMain doubles as both ydotool and wl-copy test stubs. The mode is
@@ -73,6 +74,17 @@ func runStubClipper() error {
 	stdinBytes, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return err
+	}
+
+	// Tests that exercise the cancel/timeout path need the stub to stay
+	// alive long enough for cmd.Wait to be interrupted. Without this
+	// hook the stub drains stdin and exits in well under a millisecond,
+	// so a "cancel after 10ms" goroutine often races and finds the
+	// process already gone. Tests set this; production never does.
+	if blockStr := os.Getenv("DICTA_DISPATCH_STUB_BLOCK_MS"); blockStr != "" {
+		if ms, err := strconv.Atoi(blockStr); err == nil && ms > 0 {
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
 	}
 
 	logPath := os.Getenv("DICTA_DISPATCH_STUB_LOG")
