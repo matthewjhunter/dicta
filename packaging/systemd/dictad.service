@@ -5,12 +5,33 @@ After=graphical-session.target pipewire.service
 Wants=pipewire.service
 
 [Service]
-Type=notify
-ExecStart=/usr/local/bin/dictad
+# Type=simple because dictad does not yet call sd_notify(READY=1).
+# When the daemon learns to signal readiness, switch to Type=notify so
+# units ordered After= dictad don't race the socket coming up.
+Type=simple
+# Installed by `task install:user` into the user's ~/.local/bin. For a
+# system-wide install, override via `systemctl --user edit` (or ship a
+# variant of this unit pointing at /usr/local/bin/dictad).
+ExecStart=%h/.local/bin/dictad
 Restart=on-failure
 RestartSec=3
 
 # Hardening (§7.1, §8)
+#
+# This is the *user-systemd* posture. The directives below all work in
+# Ubuntu 25.10's user systemd (257); the four kernel/cgroup/namespace
+# protections that imply CapabilityBoundingSet drops are intentionally
+# omitted because the user manager has no caps to drop and refuses the
+# unit with status=218/CAPABILITIES.
+#
+# Removed for user-systemd compatibility (re-enable in any system-wide
+# variant of this unit):
+#   ProtectKernelTunables=true
+#   ProtectKernelModules=true
+#   ProtectControlGroups=true
+#   RestrictNamespaces=true
+#
+# Kept (still enforced):
 #
 # MemoryDenyWriteExecute relies on dictad being pure Go (D13). Anything
 # that introduces CGo, an embedded interpreter, or a JIT into the daemon
@@ -28,11 +49,7 @@ ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=%h/.local/share/dicta %t
 PrivateTmp=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictRealtime=true
