@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -59,20 +60,12 @@ func Select(cfg Config) (Backend, error) {
 	}
 }
 
-// ErrOpenAIKeyMissing is returned when no API key can be resolved for
-// the openai backend. v1 rejects anonymous traffic to avoid silent
-// regressions when an env var is unset.
-var ErrOpenAIKeyMissing = errors.New("openai: no API key (set APIKey or APIKeyEnv)")
-
 func selectOpenAI(cfg OpenAIConfig) (Backend, error) {
 	cfg = cfg.withDefaults()
 
 	apiKey := cfg.APIKey
 	if apiKey == "" && cfg.APIKeyEnv != "" {
 		apiKey = os.Getenv(cfg.APIKeyEnv)
-	}
-	if apiKey == "" {
-		return nil, ErrOpenAIKeyMissing
 	}
 
 	endpoint := cfg.Endpoint
@@ -83,14 +76,20 @@ func selectOpenAI(cfg OpenAIConfig) (Backend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("openai: parse endpoint %q: %w", endpoint, err)
 	}
+	loopback := isLoopbackHost(u.Hostname())
 	switch u.Scheme {
 	case "https":
 		// fine
 	case "http":
-		// http endpoints leak the bearer token in cleartext; warn loudly.
-		slog.Default().Warn("asr.openai endpoint uses http:// — API key will be sent in cleartext",
-			"endpoint", endpoint,
-			"guidance", "use https:// for any non-loopback target")
+		if !loopback && apiKey != "" {
+			// http endpoints leak the bearer token in cleartext; warn
+			// loudly. Loopback http is acceptable — never leaves the host.
+			// No key means no auth header to leak; transcripts still go
+			// over the wire in cleartext but that's a separate concern.
+			slog.Default().Warn("asr.openai endpoint uses http:// — API key will be sent in cleartext",
+				"endpoint", endpoint,
+				"guidance", "use https:// for any non-loopback target")
+		}
 	default:
 		return nil, fmt.Errorf("openai: unsupported endpoint scheme %q (want http or https)", u.Scheme)
 	}
@@ -152,6 +151,23 @@ func selectWyoming(cfg WyomingConfig) (Backend, error) {
 		Max:         cfg.ReconnectBackoffMax,
 		MaxAttempts: cfg.MaxAttempts,
 	}), nil
+}
+
+// isLoopbackHost reports whether host is a loopback target — either the
+// literal "localhost" hostname or any IP in 127.0.0.0/8 or ::1. Used to
+// suppress the http-cleartext WARN for loopback endpoints, where a
+// bearer token never actually leaves the host.
+func isLoopbackHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // parseWyomingAddr accepts either a bare host:port or a tcp:// URL and

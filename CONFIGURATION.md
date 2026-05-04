@@ -78,7 +78,7 @@ dicta does NOT auto-download models.
 
 | Flag | Default | What it does |
 |------|---------|--------------|
-| `--asr-openai-key-env` | `OPENAI_API_KEY` | Env var to read the bearer token from. Empty key = backend rejected at startup (no anonymous traffic). |
+| `--asr-openai-key-env` | `OPENAI_API_KEY` | Env var to read the bearer token from. dicta does not enforce key presence — the server decides whether anonymous traffic is accepted. An unset env var produces a request with no `Authorization` header. |
 | `--asr-openai-endpoint` | (asrclient default) | Endpoint URL. Empty uses upstream OpenAI. |
 | `--asr-openai-model` | (asrclient default) | Model name. Empty uses `whisper-1`. |
 | `--asr-openai-tls-skip-verify` | `false` | **DANGEROUS**: skip TLS verification. Testing-only knob; emits a startup WARN. Never set this on a non-LAN target. |

@@ -84,13 +84,6 @@ func TestSelect_WhispercppOK(t *testing.T) {
 	}
 }
 
-func TestSelect_OpenAIRequiresKey(t *testing.T) {
-	_, err := Select(Config{Backend: "openai"})
-	if !errors.Is(err, ErrOpenAIKeyMissing) {
-		t.Errorf("got %v, want ErrOpenAIKeyMissing", err)
-	}
-}
-
 func TestSelect_OpenAIOK(t *testing.T) {
 	b, err := Select(Config{
 		Backend: "openai",

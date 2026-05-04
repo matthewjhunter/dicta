@@ -2,7 +2,6 @@ package asr
 
 import (
 	"bytes"
-	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -11,10 +10,32 @@ import (
 	"github.com/matthewjhunter/asrclient/openai"
 )
 
-func TestSelectOpenAI_RequiresKey(t *testing.T) {
-	_, err := selectOpenAI(OpenAIConfig{})
-	if !errors.Is(err, ErrOpenAIKeyMissing) {
-		t.Errorf("got %v, want ErrOpenAIKeyMissing", err)
+func TestSelectOpenAI_EmptyKeyAccepted(t *testing.T) {
+	// dicta does not enforce key presence — the server decides. An
+	// unset env var or absent APIKey must still produce a working
+	// backend, regardless of endpoint locality.
+	cases := []string{
+		"", // default endpoint
+		"http://localhost:13305/v1/audio/transcriptions",  // loopback http
+		"http://127.0.0.1:8080/v1/audio/transcriptions",   // loopback http
+		"http://[::1]:8080/v1/audio/transcriptions",       // loopback http
+		"https://api.openai.com/v1/audio/transcriptions",  // remote https
+		"http://example.com:9000/v1/audio/transcriptions", // remote http
+	}
+	for _, ep := range cases {
+		name := ep
+		if name == "" {
+			name = "default"
+		}
+		t.Run(name, func(t *testing.T) {
+			b, err := selectOpenAI(OpenAIConfig{Endpoint: ep})
+			if err != nil {
+				t.Fatalf("selectOpenAI: %v", err)
+			}
+			if b == nil {
+				t.Fatal("backend nil")
+			}
+		})
 	}
 }
 
@@ -41,14 +62,6 @@ func TestSelectOpenAI_ExplicitKeyBeatsEnv(t *testing.T) {
 	}
 }
 
-func TestSelectOpenAI_EmptyEnvVarStillErrors(t *testing.T) {
-	t.Setenv("DICTA_TEST_OPENAI_MISSING", "")
-	_, err := selectOpenAI(OpenAIConfig{APIKeyEnv: "DICTA_TEST_OPENAI_MISSING"})
-	if !errors.Is(err, ErrOpenAIKeyMissing) {
-		t.Errorf("got %v, want ErrOpenAIKeyMissing", err)
-	}
-}
-
 func TestSelectOpenAI_BadEndpointScheme(t *testing.T) {
 	_, err := selectOpenAI(OpenAIConfig{
 		APIKey:   "sk-test",
@@ -60,6 +73,24 @@ func TestSelectOpenAI_BadEndpointScheme(t *testing.T) {
 }
 
 func TestSelectOpenAI_HTTPEndpointEmitsWarning(t *testing.T) {
+	// Non-loopback http target: bearer token would actually traverse the
+	// network in cleartext, so the WARN must fire.
+	buf := captureSlog(t)
+	_, err := selectOpenAI(OpenAIConfig{
+		APIKey:   "sk-test",
+		Endpoint: "http://example.com:9000/v1/audio/transcriptions",
+	})
+	if err != nil {
+		t.Fatalf("selectOpenAI: %v", err)
+	}
+	if !strings.Contains(buf.String(), "cleartext") {
+		t.Errorf("expected cleartext WARN; got: %s", buf.String())
+	}
+}
+
+func TestSelectOpenAI_LoopbackHTTPNoCleartextWarn(t *testing.T) {
+	// Loopback http stays on the host; the cleartext WARN is misleading
+	// here and would train users to ignore it. Suppress for loopback.
 	buf := captureSlog(t)
 	_, err := selectOpenAI(OpenAIConfig{
 		APIKey:   "sk-test",
@@ -68,8 +99,25 @@ func TestSelectOpenAI_HTTPEndpointEmitsWarning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("selectOpenAI: %v", err)
 	}
-	if !strings.Contains(buf.String(), "cleartext") {
-		t.Errorf("expected cleartext WARN; got: %s", buf.String())
+	if strings.Contains(buf.String(), "cleartext") {
+		t.Errorf("loopback http should not emit cleartext WARN; got: %s", buf.String())
+	}
+}
+
+func TestSelectOpenAI_NonLoopbackHTTPNoKeyNoWarn(t *testing.T) {
+	// No key means no Authorization header, so the cleartext-WARN's
+	// stated risk ("API key will be sent in cleartext") doesn't apply
+	// and would be misleading. The audio body is still cleartext over
+	// http, but that's a separate transport concern not gated here.
+	buf := captureSlog(t)
+	_, err := selectOpenAI(OpenAIConfig{
+		Endpoint: "http://example.com:9000/v1/audio/transcriptions",
+	})
+	if err != nil {
+		t.Fatalf("selectOpenAI: %v", err)
+	}
+	if strings.Contains(buf.String(), "cleartext") {
+		t.Errorf("non-loopback http with no key should not emit cleartext WARN; got: %s", buf.String())
 	}
 }
 
