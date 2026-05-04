@@ -93,6 +93,7 @@ dicta does NOT auto-download models.
 | `--ydotool-socket` | (empty) | `ydotoold` socket path. Empty = let ydotool pick its default. |
 | `--type-chunk-size` | `200` | Chunk size in characters per ydotool invocation. Larger = fewer roundtrips, smaller = lower latency on each chunk. |
 | `--type-chunk-delay` | `20ms` | Delay between chunks. Some apps drop characters when typed faster than this. |
+| `--type-key-delay` | `60ms` | Forwarded to `ydotool --key-delay` (delay between individual keystrokes). ydotool's own default is 12ms; under the daemon's hardened systemd scheduling the kernel uinput buffer drops space keysyms at that rate, so dicta defaults higher. Lower it on machines where the default works to type faster; raise it if you still see dropped characters. `0` falls back to ydotool's 12ms. |
 
 Type-mode strips `\n` defensively before invoking ydotool (D12), to
 prevent newline injection into shell prompts.

@@ -48,6 +48,7 @@ func main() {
 	ydotoolSocketFlag := flag.String("ydotool-socket", "", "ydotoold socket path (empty = let ydotool pick its default)")
 	typeChunkSizeFlag := flag.Int("type-chunk-size", 200, "ydotool dispatch chunk size in characters")
 	typeChunkDelayFlag := flag.Duration("type-chunk-delay", 20*time.Millisecond, "delay between ydotool chunks")
+	typeKeyDelayFlag := flag.Duration("type-key-delay", 60*time.Millisecond, "ydotool --key-delay between keystrokes (0 = ydotool default 12ms; lower values risk dropped spaces under hardened systemd scheduling)")
 	audioCuesFlag := flag.Bool("audio-cues", true, "play short tones on session open/close")
 	wlCopyBinaryFlag := flag.String("wl-copy-binary", "/usr/bin/wl-copy", "wl-copy binary path (clip-mode commit)")
 	previewBinaryFlag := flag.String("preview-binary", "", "dicta-preview binary path (empty = clip-mode disabled)")
@@ -178,6 +179,7 @@ func main() {
 			Socket:     *ydotoolSocketFlag,
 			ChunkSize:  *typeChunkSizeFlag,
 			ChunkDelay: *typeChunkDelayFlag,
+			KeyDelay:   *typeKeyDelayFlag,
 			Logger:     logger,
 		})
 		if err != nil {
