@@ -120,3 +120,15 @@ tasks:
       - install -d ~/.config/systemd/user
       - install -m 0644 packaging/systemd/dictad.service ~/.config/systemd/user/dictad.service
       - systemctl --user daemon-reload
+
+  install:keybindings:
+    desc: |
+      Bind Pause -> type-mode toggle and Scroll Lock -> clip-mode toggle
+      via GNOME's custom-keybindings (gsettings). Idempotent; preserves
+      any other custom-keybindings already configured. Each binding wraps
+      `systemctl --user start dictad` so the daemon auto-launches on
+      first press. Run `scripts/setup-keybindings-gnome.sh --uninstall`
+      to remove. GNOME-only for now; bind manually under other
+      compositors (see CONFIGURATION.md).
+    cmds:
+      - scripts/setup-keybindings-gnome.sh
