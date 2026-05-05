@@ -52,6 +52,16 @@ func runStubTyper() error {
 		}
 	}
 
+	// Tests that exercise the per-invoke timeout path need the stub to
+	// take measurable wall-clock time so the test can verify the timeout
+	// scaling actually permits long invocations. Tests set this;
+	// production never does.
+	if blockStr := os.Getenv("DICTA_DISPATCH_STUB_DELAY_MS"); blockStr != "" {
+		if ms, err := strconv.Atoi(blockStr); err == nil && ms > 0 {
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
+	}
+
 	logPath := os.Getenv("DICTA_DISPATCH_STUB_LOG")
 	if logPath == "" {
 		return nil

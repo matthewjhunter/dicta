@@ -267,6 +267,83 @@ func TestNewSubprocessTyper_RejectsRelativeBinary(t *testing.T) {
 	}
 }
 
+// TestTyper_InvokeTimeoutScalesWithText guards the typing-budget fix.
+// Before this change the per-invoke timeout was a flat 5 s, which
+// SIGKILLed ydotool on any chunk longer than ~83 chars at 60 ms/key
+// and left a uinput key held down (kernel autorepeat triggered runs
+// like "nnnnnnnnn..."). The timeout must scale with rune count ×
+// KeyDelay so long chunks can finish typing.
+func TestTyper_InvokeTimeoutScalesWithText(t *testing.T) {
+	cases := []struct {
+		name        string
+		base        time.Duration
+		keyDelay    time.Duration
+		text        string
+		wantAtLeast time.Duration
+	}{
+		{
+			name:        "no key delay -> base only",
+			base:        5 * time.Second,
+			keyDelay:    0,
+			text:        strings.Repeat("a", 200),
+			wantAtLeast: 5 * time.Second,
+		},
+		{
+			name:        "200 chars at 60ms -> ~5s + 18s budget",
+			base:        5 * time.Second,
+			keyDelay:    60 * time.Millisecond,
+			text:        strings.Repeat("a", 200),
+			wantAtLeast: 5*time.Second + 17*time.Second,
+		},
+		{
+			name:        "100 chars at 60ms -> ~5s + 9s budget",
+			base:        5 * time.Second,
+			keyDelay:    60 * time.Millisecond,
+			text:        strings.Repeat("a", 100),
+			wantAtLeast: 5*time.Second + 8*time.Second,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tp := &SubprocessTyper{cfg: TyperConfig{
+				InvokeTimeout: tc.base,
+				KeyDelay:      tc.keyDelay,
+			}}
+			got := tp.invokeTimeout(tc.text)
+			if got < tc.wantAtLeast {
+				t.Errorf("invokeTimeout(%d chars, %s) = %s; want >= %s",
+					len(tc.text), tc.keyDelay, got, tc.wantAtLeast)
+			}
+		})
+	}
+}
+
+// TestTyper_LongChunkNotKilled is the integration-shaped guard against
+// the regression. With KeyDelay set high enough that a 200-char chunk
+// would exceed a 5 s static timeout, the typer must still complete
+// successfully. The stub binary respects DICTA_DISPATCH_STUB_DELAY_MS
+// (per-invocation sleep) so we can simulate slow ydotool typing
+// without actually pressing keys.
+func TestTyper_LongChunkNotKilled(t *testing.T) {
+	cfg, logPath := stubTyperConfig(t)
+	cfg.InvokeTimeout = 1 * time.Second
+	cfg.KeyDelay = 60 * time.Millisecond
+	t.Setenv("DICTA_DISPATCH_STUB_DELAY_MS", "1500") // 1.5s, well past base
+	tp, err := NewSubprocessTyper(cfg)
+	if err != nil {
+		t.Fatalf("NewSubprocessTyper: %v", err)
+	}
+	// 200 chars × 60 ms = 12 s budget; base 1 s + 1.5×12 s = 19 s window.
+	// Stub sleeps 1.5 s — comfortably inside the scaled timeout but
+	// outside the 1 s base. Without the scaling fix this would fail.
+	if err := tp.Type(t.Context(), strings.Repeat("a", 200)); err != nil {
+		t.Fatalf("Type returned error: %v", err)
+	}
+	if got := readInvocations(t, logPath); len(got) != 1 {
+		t.Errorf("expected 1 invocation, got %d", len(got))
+	}
+}
+
 func TestNewSubprocessTyper_RejectsNonAbsoluteSocket(t *testing.T) {
 	cfg, _ := stubTyperConfig(t)
 	cfg.Socket = "relative/path"

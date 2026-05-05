@@ -9,7 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // Typer dispatches text to the keyboard via ydotool. Implementations are
@@ -43,7 +45,10 @@ type TyperConfig struct {
 	// pick its default.
 	KeyDelay time.Duration
 
-	// InvokeTimeout is the per-invocation deadline. 0 = 5 s.
+	// InvokeTimeout is the baseline per-invocation deadline; the
+	// effective deadline scales with text length × KeyDelay so long
+	// chunks aren't SIGKILLed mid-keystroke (which would leave a
+	// uinput key held down and trigger kernel autorepeat). 0 = 5 s.
 	InvokeTimeout time.Duration
 
 	// BinaryAllowlist gates the Binary path. Empty = DefaultBinaryAllowlist.
@@ -180,7 +185,7 @@ func (t *SubprocessTyper) invoke(ctx context.Context, text string) error {
 	}
 	args = append(args, "--", text)
 
-	invokeCtx, cancel := context.WithTimeout(ctx, t.cfg.InvokeTimeout)
+	invokeCtx, cancel := context.WithTimeout(ctx, t.invokeTimeout(text))
 	defer cancel()
 
 	cmd := exec.CommandContext(invokeCtx, t.cfg.Binary, args...)
@@ -195,6 +200,13 @@ func (t *SubprocessTyper) invoke(ctx context.Context, text string) error {
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// If ydotool exited via signal we may have left a uinput key
+		// pressed-but-not-released. Send a release-all sweep so the
+		// kernel doesn't autorepeat the held key into the user's
+		// window. Best-effort; if recovery itself fails we just log.
+		if killedBySignal(err) {
+			t.releaseAllKeys(ctx)
+		}
 		// If the parent context was canceled, surface that directly —
 		// "signal: killed" from the subprocess is just the side-effect.
 		if ctx.Err() != nil {
@@ -211,6 +223,86 @@ func (t *SubprocessTyper) invoke(ctx context.Context, text string) error {
 		return fmt.Errorf("ydotool: %w (output=%q)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// invokeTimeout returns the deadline budget for one ydotool invocation.
+// The base (cfg.InvokeTimeout, default 5 s) covers ydotool startup and
+// the ydotoold round-trip; on top of that we add 1.5× the expected
+// typing duration (rune count × KeyDelay) so long chunks don't get
+// SIGKILLed mid-keystroke. The 1.5× safety factor absorbs jitter in
+// ydotool's per-key sleep.
+func (t *SubprocessTyper) invokeTimeout(text string) time.Duration {
+	base := t.cfg.InvokeTimeout
+	if base <= 0 {
+		base = 5 * time.Second
+	}
+	if t.cfg.KeyDelay <= 0 {
+		return base
+	}
+	typingBudget := time.Duration(utf8.RuneCountInString(text)) * t.cfg.KeyDelay
+	return base + time.Duration(float64(typingBudget)*1.5)
+}
+
+// killedBySignal reports whether err from exec.Cmd.CombinedOutput
+// indicates the subprocess exited via a signal (e.g. SIGKILL from a
+// context-deadline expiration). Non-zero exits and pre-exec errors
+// (binary missing, etc.) return false.
+func killedBySignal(err error) bool {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		return false
+	}
+	ws, ok := ee.Sys().(syscall.WaitStatus)
+	if !ok {
+		return false
+	}
+	return ws.Signaled()
+}
+
+// keysReleaseAll is the argv tail for a `ydotool key` invocation that
+// releases every key the `type` subcommand can press. Codes match
+// linux/input-event-codes.h. Releasing an already-released key is a
+// no-op in uinput, so this sweep is idempotent.
+//
+// Coverage: a-z (26), 0-9 (10), shift (L+R), ctrl (L), alt (L+R), and
+// the ASCII punctuation ydotool uses for shifted/unshifted symbols.
+var keysReleaseAll = []string{
+	// letters a..z
+	"30:0", "48:0", "46:0", "32:0", "18:0", "33:0", "34:0", "35:0",
+	"23:0", "36:0", "37:0", "38:0", "50:0", "49:0", "24:0", "25:0",
+	"16:0", "19:0", "31:0", "20:0", "22:0", "47:0", "17:0", "45:0",
+	"21:0", "44:0",
+	// digits 1..9, 0
+	"2:0", "3:0", "4:0", "5:0", "6:0", "7:0", "8:0", "9:0", "10:0", "11:0",
+	// punctuation
+	"12:0", "13:0", "26:0", "27:0", "39:0", "40:0", "41:0", "43:0",
+	"51:0", "52:0", "53:0", "57:0",
+	// modifiers
+	"42:0", "54:0", "29:0", "56:0", "100:0",
+}
+
+// releaseAllKeys runs `ydotool key <code>:0 ...` to recover from a
+// uinput key left held down after a SIGKILL'd type invocation. The
+// recovery has its own short context so a wedged ydotoold can't
+// compound the failure.
+func (t *SubprocessTyper) releaseAllKeys(ctx context.Context) {
+	args := append([]string{"key"}, keysReleaseAll...)
+	relCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(relCtx, t.cfg.Binary, args...)
+	if t.cfg.Socket != "" {
+		env := os.Environ()
+		env = filterEnv(env, "YDOTOOL_SOCKET")
+		env = append(env, "YDOTOOL_SOCKET="+t.cfg.Socket)
+		cmd.Env = env
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.cfg.Logger.Warn("dispatch.type: stuck-key recovery failed",
+			"err", err, "output", strings.TrimSpace(string(out)))
+		return
+	}
+	t.cfg.Logger.Info("dispatch.type: stuck-key recovery sent")
 }
 
 // filterEnv returns env with any entries matching `name=...` removed.
