@@ -51,15 +51,31 @@ func (f *fakeCleaner) Calls() []fakeCleanCall {
 }
 
 // fakeTyper records every Type call so tests can assert what made it
-// to ydotool. Mirrors the dispatch.Typer interface.
+// to ydotool. Mirrors the dispatch.Typer interface. The active/maxActive
+// counters detect concurrency violations: any test that requires
+// serialized typing can assert maxActive == 1 after the run.
 type fakeTyper struct {
-	mu    sync.Mutex
-	calls []string
-	err   error
-	delay time.Duration
+	mu        sync.Mutex
+	calls     []string
+	err       error
+	delay     time.Duration
+	active    int
+	maxActive int
 }
 
 func (f *fakeTyper) Type(ctx context.Context, text string) error {
+	f.mu.Lock()
+	f.active++
+	if f.active > f.maxActive {
+		f.maxActive = f.active
+	}
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.active--
+		f.mu.Unlock()
+	}()
+
 	if f.delay > 0 {
 		select {
 		case <-time.After(f.delay):
@@ -71,6 +87,15 @@ func (f *fakeTyper) Type(ctx context.Context, text string) error {
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, text)
 	return f.err
+}
+
+// MaxActive returns the largest concurrent-Type count observed.
+// Equal to 1 if Type calls were strictly serialized; >1 if they
+// raced.
+func (f *fakeTyper) MaxActive() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxActive
 }
 
 func (f *fakeTyper) Calls() []string {
@@ -1056,6 +1081,66 @@ func TestSession_ShutdownNoOpWhenClosed(t *testing.T) {
 	}
 	if got := len(cuer.Played()); got != 0 {
 		t.Errorf("Shutdown on closed session should not play cues; got %d", got)
+	}
+}
+
+// TestSession_TypeModeSerializesDispatch guards against the
+// concurrent-ydotool race that produced character-interleaved
+// "gibberish in the middle" output. Two transcripts arriving close
+// together (asrMonitor MaxConcurrent=2) used to call typer.Type()
+// from two parallel transcribe goroutines, racing two ydotool
+// subprocesses against uinput. The fix is a typing-only mutex on
+// the session; this test asserts no Type call overlaps another.
+//
+// Setup: 50 ms typer delay, two utterances submitted back-to-back.
+// Without the lock, both goroutines enter Type() simultaneously and
+// MaxActive() goes to 2. With the lock, the second waits and
+// MaxActive() stays at 1.
+func TestSession_TypeModeSerializesDispatch(t *testing.T) {
+	typer := &fakeTyper{delay: 50 * time.Millisecond}
+	cuer := &fakeCuer{}
+	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "hello"}}
+	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
+		BackendName:       "fake",
+		HealthInterval:    time.Hour,
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     2,
+	})
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, nil, t.Context())
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Submit two utterances back-to-back so both transcribe goroutines
+	// race to call Type. Without the typeMu the second would enter
+	// Type() while the first is still mid-delay.
+	s.OnUtterance(make([]byte, 1280))
+	s.OnUtterance(make([]byte, 1280))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(typer.Calls()) >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if got := len(typer.Calls()); got != 2 {
+		t.Fatalf("expected 2 Type calls, got %d", got)
+	}
+	if got := typer.MaxActive(); got != 1 {
+		t.Errorf("Type calls overlapped: MaxActive=%d (want 1) — concurrent ydotool processes would scramble characters into uinput", got)
+	}
+
+	// Bonus: the second transcript should have a leading space (the
+	// typedInSession check runs under the same lock so this assertion
+	// is unambiguous).
+	calls := typer.Calls()
+	if calls[0] != "hello" {
+		t.Errorf("first Type: got %q want %q", calls[0], "hello")
+	}
+	if calls[1] != " hello" {
+		t.Errorf("second Type: got %q want %q (leading space for typedInSession>0)", calls[1], " hello")
 	}
 }
 

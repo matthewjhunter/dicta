@@ -83,6 +83,18 @@ type session struct {
 	// at sentence boundaries (e.g. "Hello." + "World." -> "Hello. World.").
 	// Reset on every open_().
 	typedInSession uint64
+
+	// typeMu serializes type-mode dispatch within a single session.
+	// Whisper transcripts can complete while the previous transcript is
+	// still being typed character-by-character through ydotool (60 ms/
+	// key × tens of chars per utterance > inter-utterance gap).
+	// Without this lock the asrMonitor's parallel transcribe goroutines
+	// would race two ydotool subprocesses, both writing to uinput at
+	// once — the kernel sees a single interleaved keystream and the
+	// user sees scrambled text. typeMu also guards the typedInSession
+	// read-modify-write so the leading-space decision is atomic with
+	// the dispatch it's based on.
+	typeMu sync.Mutex
 }
 
 // ErrClipNotConfigured is returned when a clip-mode toggle fires but
@@ -375,18 +387,29 @@ func (s *session) OnUtterance(pcm []byte) {
 		case modeType:
 			cleaned = tr.Text
 			s.publishTranscript(tr, tr.Text)
+			// typeMu serializes ydotool dispatch across utterances —
+			// two concurrent Type() calls would let two ydotool
+			// subprocesses race events into uinput and produce
+			// character-interleaved gibberish. The typedInSession
+			// read and increment also live under this lock so the
+			// leading-space decision is consistent with the dispatch
+			// it gates.
+			s.typeMu.Lock()
 			s.mu.Lock()
 			typed := tr.Text
 			if s.typedInSession > 0 {
 				typed = " " + tr.Text
 			}
 			s.mu.Unlock()
-			if err := s.typer.Type(s.daemonCtx, typed); err != nil {
-				s.logger.Warn("session.type dispatch failed", "err", err)
-			} else {
+			err := s.typer.Type(s.daemonCtx, typed)
+			if err == nil {
 				s.mu.Lock()
 				s.typedInSession++
 				s.mu.Unlock()
+			}
+			s.typeMu.Unlock()
+			if err != nil {
+				s.logger.Warn("session.type dispatch failed", "err", err)
 			}
 		case modeClip:
 			cleaned, cleanupLatencyMs = s.runCleanup(tr.Text)
