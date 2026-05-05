@@ -197,3 +197,191 @@ func TestASRMonitor_BackendInterface(t *testing.T) {
 	// Compile-time check: asr.Backend is what asrMonitor stores.
 	var _ asr.Backend = &fakeASR{}
 }
+
+// TestASRMonitor_DropsHallucinationPhrase guards the second layer of
+// the "Thank you" hallucination defense. If a too-short utterance slips
+// past the audioMonitor's min-speech-frames gate, the asrMonitor must
+// still drop the canonical Whisper artifact phrases before they reach
+// the session orchestrator.
+func TestASRMonitor_DropsHallucinationPhrase(t *testing.T) {
+	cases := []struct {
+		text    string
+		dropped bool
+	}{
+		{"Thank you.", true},
+		{"thank you", true},
+		{"  Thanks for watching!  ", true},
+		{"You.", true},
+		{"you", true},
+		{".", true},
+		{"", true},
+		{"Hello world", false},
+		{"Yes please", false},
+		{"thank you very much", false}, // outside the deny-list
+	}
+	for _, tc := range cases {
+		t.Run(tc.text, func(t *testing.T) {
+			f := &fakeASR{transcript: asrclient.Transcript{Text: tc.text}}
+			m := newASRMonitor(discardLogger(), f, asrMonitorConfig{
+				BackendName:       "fake",
+				HealthInterval:    time.Hour,
+				TranscribeTimeout: time.Second,
+				MaxConcurrent:     1,
+			})
+			var fired atomic.Bool
+			m.OnUtterance(make([]byte, 1280), func(transcriptResult) {
+				fired.Store(true)
+			})
+
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				if f.transcribeCall.Load() == 1 {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			// Give the goroutine a beat to finish the post-Transcribe
+			// branch before we read.
+			time.Sleep(20 * time.Millisecond)
+
+			s := m.Snapshot()
+			if tc.dropped {
+				if s.Transcripts != 0 {
+					t.Errorf("Transcripts: got %d want 0 (dropped)", s.Transcripts)
+				}
+				if fired.Load() {
+					t.Errorf("onTranscript fired for hallucination %q", tc.text)
+				}
+			} else {
+				if s.Transcripts != 1 {
+					t.Errorf("Transcripts: got %d want 1 (kept)", s.Transcripts)
+				}
+				if !fired.Load() {
+					t.Errorf("onTranscript did not fire for kept transcript %q", tc.text)
+				}
+			}
+		})
+	}
+}
+
+// TestASRMonitor_DropsRepetitionLoop guards the post-ASR repetition
+// loop filter. Whisper-family models occasionally degenerate into
+// looping a single character or fragment ("vvvvvvvv...", "nnnnnn...")
+// when the input audio has broadband transients (mechanical key clicks,
+// mouse clicks). The asrMonitor must drop these before they reach the
+// session orchestrator and end up typed into the user's window.
+func TestASRMonitor_DropsRepetitionLoop(t *testing.T) {
+	cases := []struct {
+		text    string
+		dropped bool
+	}{
+		{"vvvvvvvvvvvvvvvvv", true},
+		{"nnnnnnnnnn", true},
+		{"vv", true},                // 2-char run of forbidden letter
+		{"yy", true},                // y not in allowlist
+		{"Hello, vvvvvv yes", true}, // run embedded in larger text
+		{"aaaa", true},              // 3+ rule fires even on allowed letters
+		{"Mississippi", false},      // ss/pp legitimate, no triples
+		{"see you", false},          // ee allowed
+		{"running well", false},     // nn / ll allowed
+		{"all", false},              // ll allowed
+		{"trekking", false},         // kk allowed (rare but real)
+		{"Hello world", false},      // ll allowed
+		{"yes", false},
+		{"v", false},        // single char is not a loop
+		{"11", false},       // digits ignored
+		{"hh", true},        // h not in allowlist
+		{"Buzz off", false}, // zz and ff both allowed
+	}
+	for _, tc := range cases {
+		t.Run(tc.text, func(t *testing.T) {
+			f := &fakeASR{transcript: asrclient.Transcript{Text: tc.text}}
+			m := newASRMonitor(discardLogger(), f, asrMonitorConfig{
+				BackendName:       "fake",
+				HealthInterval:    time.Hour,
+				TranscribeTimeout: time.Second,
+				MaxConcurrent:     1,
+			})
+			var fired atomic.Bool
+			m.OnUtterance(make([]byte, 1280), func(transcriptResult) {
+				fired.Store(true)
+			})
+
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				if f.transcribeCall.Load() == 1 {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			time.Sleep(20 * time.Millisecond)
+
+			s := m.Snapshot()
+			if tc.dropped {
+				if s.Transcripts != 0 {
+					t.Errorf("Transcripts: got %d want 0 (dropped)", s.Transcripts)
+				}
+				if fired.Load() {
+					t.Errorf("onTranscript fired for repetition loop %q", tc.text)
+				}
+			} else {
+				if s.Transcripts != 1 {
+					t.Errorf("Transcripts: got %d want 1 (kept)", s.Transcripts)
+				}
+				if !fired.Load() {
+					t.Errorf("onTranscript did not fire for kept transcript %q", tc.text)
+				}
+			}
+		})
+	}
+}
+
+func TestIsWhisperRepetitionLoop_Cases(t *testing.T) {
+	wantTrue := []string{
+		"vv", "VV", "vvv", "vvvvvvvv",
+		"nnn", "NNN", "aaa", "EEE",
+		"hh", "jj", "qq", "ww", "xx", "yy",
+		"hello vvv world",
+		"this is jjjjjj a test",
+	}
+	for _, s := range wantTrue {
+		if !isWhisperRepetitionLoop(s) {
+			t.Errorf("expected loop match for %q", s)
+		}
+	}
+	wantFalse := []string{
+		"", "v", "n", "a",
+		"see", "all", "off", "egg", "running", "rabbit", "happy",
+		"less", "miss", "better", "book", "buzz", "trekking",
+		"vacuum", "skiing", "Mississippi", "bookkeeper",
+		"Hello, world!", "yes please", "no thanks",
+		"...", "!!!", "11", "1234",
+	}
+	for _, s := range wantFalse {
+		if isWhisperRepetitionLoop(s) {
+			t.Errorf("expected no loop match for %q", s)
+		}
+	}
+}
+
+func TestIsWhisperHallucination_NormalizationEdges(t *testing.T) {
+	wantTrue := []string{
+		"thank you", "Thank you.", " THANK YOU ! ",
+		"thanks for watching", "Thanks for watching.",
+		"you", "You!", ".", "", " . ", ",",
+	}
+	for _, s := range wantTrue {
+		if !isWhisperHallucination(s) {
+			t.Errorf("expected hallucination match for %q", s)
+		}
+	}
+	wantFalse := []string{
+		"thanks a lot", "you are welcome", "thank you my friend",
+		"hello", "hi", "yes", "no",
+	}
+	for _, s := range wantFalse {
+		if isWhisperHallucination(s) {
+			t.Errorf("expected no match for legitimate text %q", s)
+		}
+	}
+}

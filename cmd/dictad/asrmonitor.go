@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/matthewjhunter/dicta/internal/asr"
 	"github.com/matthewjhunter/dicta/internal/control"
@@ -172,6 +173,20 @@ func (m *asrMonitor) transcribe(pcm []byte, onTranscript func(transcriptResult))
 		return
 	}
 	text := strings.TrimSpace(tr.Text)
+	if isWhisperHallucination(text) {
+		m.logger.Info("asr.transcript dropped: hallucination phrase",
+			"text", text,
+			"audio_ms", int(time.Duration(len(pcm))/time.Duration(2*16)),
+			"duration_ms", dur.Milliseconds())
+		return
+	}
+	if isWhisperRepetitionLoop(text) {
+		m.logger.Info("asr.transcript dropped: repetition loop",
+			"text", text,
+			"audio_ms", int(time.Duration(len(pcm))/time.Duration(2*16)),
+			"duration_ms", dur.Milliseconds())
+		return
+	}
 	m.transcripts.Add(1)
 	m.lastTranscript.Store(text)
 	uttID := fmt.Sprintf("u%d-%d", start.Unix(), m.utteranceSeq.Add(1))
@@ -191,6 +206,95 @@ func (m *asrMonitor) transcribe(pcm []byte, onTranscript func(transcriptResult))
 			PCM:          pcm,
 		})
 	}
+}
+
+// whisperHallucinations is the conservative deny-list of phrases that
+// Whisper-family models reliably produce on near-silent or single-blip
+// audio. The list is intentionally small — broader filters start
+// catching real one-word utterances. Compared after lowercasing,
+// trimming surrounding whitespace, and stripping trailing punctuation.
+var whisperHallucinations = map[string]struct{}{
+	"":                               {},
+	"you":                            {},
+	"thank you":                      {},
+	"thanks":                         {},
+	"thanks for watching":            {},
+	"thank you for watching":         {},
+	"thank you so much":              {},
+	"thank you so much for watching": {},
+	"bye":                            {},
+	"goodbye":                        {},
+}
+
+// isWhisperHallucination reports whether text matches one of the known
+// Whisper artifact phrases. The normalization step strips trailing
+// punctuation (".", "!", "?", ",") and any surrounding whitespace, then
+// lowercases. A leading-space-only or pure-punctuation transcript also
+// qualifies (it normalizes to "").
+func isWhisperHallucination(text string) bool {
+	norm := strings.ToLower(strings.TrimSpace(text))
+	norm = strings.TrimRight(norm, ".!?, ")
+	norm = strings.TrimSpace(norm)
+	_, ok := whisperHallucinations[norm]
+	return ok
+}
+
+// allowedDoubleLetters is the set of ASCII letters that legitimately
+// appear doubled in English words (e.g. "see", "all", "running",
+// "rabbit"). A run of exactly two of these letters in a transcript is
+// treated as normal text. A run of two of any other letter — h, j, q,
+// v, w, x, y — has no English-word source and is treated as a Whisper
+// decoder degeneration artifact.
+//
+// Comparison is case-insensitive: keys are stored lowercased and the
+// scanner lowercases each rune before lookup.
+var allowedDoubleLetters = map[rune]struct{}{
+	'a': {}, 'b': {}, 'c': {}, 'd': {}, 'e': {}, 'f': {}, 'g': {},
+	'i': {}, 'k': {}, 'l': {}, 'm': {}, 'n': {}, 'o': {}, 'p': {},
+	'r': {}, 's': {}, 't': {}, 'u': {}, 'z': {},
+}
+
+// isWhisperRepetitionLoop reports whether text contains a character-run
+// pattern indicative of a Whisper decoder degeneration loop. Two
+// patterns trigger:
+//
+//  1. Any letter repeated three or more times consecutively. No
+//     standard English word contains three consecutive identical
+//     letters, so a run of 3+ is unambiguously an artifact.
+//  2. Any letter outside allowedDoubleLetters repeated exactly twice.
+//     Whisper occasionally emits short loops like "vv" or "yy" that
+//     wouldn't trip the 3+ rule but still don't correspond to any
+//     English word.
+//
+// Non-letter runes (digits, punctuation, whitespace) are not scanned —
+// "..." and "11" are legitimate transcript content.
+func isWhisperRepetitionLoop(text string) bool {
+	var prev rune
+	var run int
+	for _, r := range text {
+		lower := unicode.ToLower(r)
+		if !unicode.IsLetter(lower) {
+			prev = 0
+			run = 0
+			continue
+		}
+		if lower == prev {
+			run++
+		} else {
+			prev = lower
+			run = 1
+			continue
+		}
+		if run >= 3 {
+			return true
+		}
+		if run == 2 {
+			if _, allowed := allowedDoubleLetters[lower]; !allowed {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // healthLoop polls Healthy on cfg.HealthInterval and updates the
