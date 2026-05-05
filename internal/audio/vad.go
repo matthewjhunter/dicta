@@ -2,6 +2,7 @@ package audio
 
 import (
 	"math"
+	"slices"
 	"time"
 )
 
@@ -66,14 +67,23 @@ type EnergyVAD struct {
 	// remaining time to spend in calibration mode (counted down per frame).
 	calibrateRemaining time.Duration
 
-	// running sum of RMS samples observed during calibration so we can
-	// average them when calibration ends.
-	calSum   float64
-	calCount int
+	// RMS samples observed during calibration. We take the median (not
+	// the arithmetic mean) at end-of-calibration so the floor estimate
+	// is robust to click outliers — a few key/mouse clicks falling
+	// inside the calibration window otherwise drag the mean up by an
+	// order of magnitude and leave the speech threshold above voice.
+	calSamples []float64
 
 	// hangover/utterance state.
 	inUtterance bool
 	silenceRun  time.Duration
+
+	// lastRawSpeech mirrors the most recent raw classification (pre-
+	// hangover). Exposed via LastRawSpeech so the audio monitor can
+	// distinguish "actual energy crossed the threshold" from "still
+	// inside the hangover window after a single blip" — the latter is
+	// what produces "Thank you" hallucinations from Whisper-family ASR.
+	lastRawSpeech bool
 
 	// window length in samples (S16 stereo math elsewhere is sample-pair).
 	winSamples int
@@ -100,10 +110,10 @@ func NewEnergyVAD(cfg VADConfig) *EnergyVAD {
 func (v *EnergyVAD) Reset() {
 	v.floor = v.cfg.FloorInitial
 	v.calibrateRemaining = v.cfg.Calibrate
-	v.calSum = 0
-	v.calCount = 0
+	v.calSamples = v.calSamples[:0]
 	v.inUtterance = false
 	v.silenceRun = 0
+	v.lastRawSpeech = false
 }
 
 // IsSpeech classifies one Frame. The frame's PCM length is expected to
@@ -111,25 +121,30 @@ func (v *EnergyVAD) Reset() {
 func (v *EnergyVAD) IsSpeech(frame Frame) bool {
 	rmsValues := windowRMS(frame.PCM, v.winSamples)
 	if len(rmsValues) == 0 {
+		v.lastRawSpeech = false
 		return v.applyHangover(false, FrameDuration)
 	}
 
 	frameDur := FrameDuration
 
-	// Calibration: assume silence, accumulate RMS toward the floor estimate.
+	// Calibration: collect raw sub-window RMS samples; we take the
+	// median at end-of-window so click outliers don't poison the floor
+	// estimate. Arithmetic mean was rejected here because a single
+	// keypress during the 500 ms calibration can drag the floor up
+	// ~10× and push the post-calibration speech threshold above voice
+	// energy, leaving the user in a "session is open but VAD detects
+	// no speech" silent-failure state.
 	if v.calibrateRemaining > 0 {
-		for _, r := range rmsValues {
-			v.calSum += r
-			v.calCount++
-		}
+		v.calSamples = append(v.calSamples, rmsValues...)
 		v.calibrateRemaining -= frameDur
-		if v.calibrateRemaining <= 0 && v.calCount > 0 {
-			avg := v.calSum / float64(v.calCount)
-			if avg < v.cfg.MinFloor {
-				avg = v.cfg.MinFloor
+		if v.calibrateRemaining <= 0 && len(v.calSamples) > 0 {
+			floor := medianFloat64(v.calSamples)
+			if floor < v.cfg.MinFloor {
+				floor = v.cfg.MinFloor
 			}
-			v.floor = avg
+			v.floor = floor
 		}
+		v.lastRawSpeech = false
 		return v.applyHangover(false, frameDur)
 	}
 
@@ -157,8 +172,16 @@ func (v *EnergyVAD) IsSpeech(frame Frame) bool {
 		}
 	}
 
+	v.lastRawSpeech = rawSpeech
 	return v.applyHangover(rawSpeech, frameDur)
 }
+
+// LastRawSpeech reports the raw classification from the most recent
+// IsSpeech call — true if frame energy crossed the threshold, false
+// during silence or hangover-only frames. The audio monitor uses this
+// to distinguish "real speech energy" from "still in hangover after a
+// single-frame blip", which is what triggers Whisper hallucinations.
+func (v *EnergyVAD) LastRawSpeech() bool { return v.lastRawSpeech }
 
 // NoiseFloor exposes the current noise-floor estimate (linear amplitude in
 // [0, 1]). Useful for tests and for a future "show calibration" debug
@@ -209,4 +232,19 @@ func windowRMS(pcm []byte, windowSamples int) []float64 {
 // the requested decibel difference.
 func dbToAmpRatio(db float64) float64 {
 	return math.Pow(10, db/20)
+}
+
+// medianFloat64 returns the median of xs. Sorts a copy so the caller's
+// slice is left intact. Empty input returns 0.
+func medianFloat64(xs []float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	sorted := slices.Clone(xs)
+	slices.Sort(sorted)
+	n := len(sorted)
+	if n%2 == 1 {
+		return sorted[n/2]
+	}
+	return (sorted[n/2-1] + sorted[n/2]) / 2
 }

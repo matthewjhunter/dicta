@@ -122,6 +122,123 @@ func TestEnergyVAD_BackendInterface(t *testing.T) {
 	var _ VAD = NewEnergyVAD(VADConfig{})
 }
 
+// TestEnergyVAD_LastRawSpeechSeparatesEnergyFromHangover guards the
+// invariant the audio monitor's min-speech-frames gate depends on: a
+// frame inside the hangover window has IsSpeech==true but
+// LastRawSpeech==false. Conflating the two would let single-blip
+// utterances through, which is exactly what produces "Thank you"
+// hallucinations.
+func TestEnergyVAD_LastRawSpeechSeparatesEnergyFromHangover(t *testing.T) {
+	v := NewEnergyVAD(VADConfig{Hangover: 200 * time.Millisecond})
+	for range 8 {
+		v.IsSpeech(silentFrame())
+	}
+	if v.LastRawSpeech() {
+		t.Error("post-calibration silence: LastRawSpeech should be false")
+	}
+
+	if !v.IsSpeech(sineFrame(0.5)) {
+		t.Fatal("loud frame should be speech")
+	}
+	if !v.LastRawSpeech() {
+		t.Error("loud frame should set LastRawSpeech=true")
+	}
+
+	// Within the hangover window: smoothed IsSpeech is still true, but
+	// the raw classification should be false.
+	if !v.IsSpeech(silentFrame()) {
+		t.Fatal("hangover frame should still report speech")
+	}
+	if v.LastRawSpeech() {
+		t.Error("hangover-only frame must report LastRawSpeech=false")
+	}
+}
+
+// TestEnergyVAD_LastRawSpeechResetClears confirms Reset clears the raw
+// flag; otherwise a stale "true" would leak across sessions and
+// suppress the gate's first-utterance correctness.
+func TestEnergyVAD_LastRawSpeechResetClears(t *testing.T) {
+	v := NewEnergyVAD(VADConfig{})
+	for range 8 {
+		v.IsSpeech(silentFrame())
+	}
+	v.IsSpeech(sineFrame(0.5))
+	if !v.LastRawSpeech() {
+		t.Fatal("setup: expected LastRawSpeech=true")
+	}
+	v.Reset()
+	if v.LastRawSpeech() {
+		t.Error("Reset should clear LastRawSpeech")
+	}
+}
+
+// clickFrame builds a frame mostly silent with a single short loud
+// burst at the start, simulating a mechanical key/mouse click.
+func clickFrame(amp float64, durSamples int) Frame {
+	pcm := make([]byte, FrameBytes)
+	if durSamples > FrameSamples {
+		durSamples = FrameSamples
+	}
+	for i := range durSamples {
+		v := amp * math.Sin(2*math.Pi*1500*float64(i)/SampleRateHz)
+		s := int16(v * 32767)
+		binary.LittleEndian.PutUint16(pcm[i*2:], uint16(s))
+	}
+	return Frame{PCM: pcm, Timestamp: time.Now()}
+}
+
+// TestEnergyVAD_CalibrationRobustToClickOutliers guards against the
+// silent-failure mode where pressing a key during the 500 ms
+// calibration window inflated the floor to ~10× silence and pushed
+// the post-calibration speech threshold above voice. Median is robust
+// to a minority of click-contaminated samples; arithmetic mean (the
+// previous behavior) is not.
+//
+// Setup: 7 frames of calibration, of which 1 is a sharp click and 6
+// are silence. With mean, floor would be ~1/7 of the click amplitude;
+// with median, floor stays near silence. Post-calibration, a normal
+// voice frame must register as speech.
+func TestEnergyVAD_CalibrationRobustToClickOutliers(t *testing.T) {
+	v := NewEnergyVAD(VADConfig{MarginDB: 9})
+	// 1 frame of click contamination at the start of calibration...
+	v.IsSpeech(clickFrame(0.6, 80)) // ~5 ms loud burst
+	// ...followed by 6 quiet frames (silence_amp ~ MinFloor).
+	for range 6 {
+		v.IsSpeech(silentFrame())
+	}
+	floor := v.NoiseFloor()
+	// Floor should be near MinFloor, not pulled up by the click.
+	// Anything above ~10× MinFloor is a regression.
+	maxAcceptable := 10 * (1.0 / 32768.0)
+	if floor > maxAcceptable {
+		t.Errorf("floor pulled up by click outlier: got %v want <= %v", floor, maxAcceptable)
+	}
+	// And a normal-voice frame must now register as speech.
+	if !v.IsSpeech(sineFrame(0.1)) {
+		t.Errorf("post-calibration voice frame should register as speech; floor=%v", v.NoiseFloor())
+	}
+}
+
+func TestMedianFloat64(t *testing.T) {
+	cases := []struct {
+		in   []float64
+		want float64
+	}{
+		{nil, 0},
+		{[]float64{1}, 1},
+		{[]float64{1, 2, 3}, 2},
+		{[]float64{3, 1, 2}, 2},      // unsorted input
+		{[]float64{1, 2, 3, 4}, 2.5}, // even length
+		{[]float64{0.01, 0.01, 0.01, 0.01, 1.0}, 0.01}, // outlier ignored
+	}
+	for _, tc := range cases {
+		got := medianFloat64(tc.in)
+		if math.Abs(got-tc.want) > 1e-9 {
+			t.Errorf("medianFloat64(%v) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestDbToAmpRatio(t *testing.T) {
 	// 6 dB ≈ 2x amplitude.
 	got := dbToAmpRatio(6)
