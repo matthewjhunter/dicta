@@ -33,6 +33,15 @@ type audioMonitor struct {
 	// Zero disables the cap.
 	maxUtteranceBytes int
 
+	// minRawSpeechFrames is the floor on real-energy frames per
+	// utterance. An utterance with fewer raw-speech frames than this is
+	// dropped instead of being sent to ASR. The blip path is a single
+	// frame of speech followed by ~10 frames of hangover silence, all
+	// of which the accumulator collects — Whisper-family backends
+	// reliably hallucinate "Thank you" / "Thanks for watching" / "you"
+	// on that input. Zero disables the gate.
+	minRawSpeechFrames int
+
 	// onUtterance is invoked with the speech-region PCM of each completed
 	// utterance, on the audio goroutine. The callback should not block —
 	// the asrMonitor's OnUtterance goroutine-spawns its work.
@@ -70,6 +79,13 @@ func newAudioMonitor(log *slog.Logger, cfg audio.CaptureConfig, vadCfg audio.VAD
 // should set this to a value > 0 — without it, a stuck VAD can
 // accumulate audio indefinitely.
 func (m *audioMonitor) SetMaxUtterance(bytes int) { m.maxUtteranceBytes = bytes }
+
+// SetMinRawSpeechFrames sets the minimum number of raw-energy speech
+// frames an utterance must contain before it is forwarded to the ASR
+// backend. The default of 0 disables the gate. Only EnergyVAD exposes
+// the raw classification; with a different VAD implementation the gate
+// silently no-ops.
+func (m *audioMonitor) SetMinRawSpeechFrames(n int) { m.minRawSpeechFrames = n }
 
 // Start spawns capture and the VAD-update goroutine. It returns
 // immediately; Stop is required to release the subprocess.
@@ -123,8 +139,9 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 	energyVAD, _ := m.vad.(*audio.EnergyVAD)
 
 	var (
-		inUtterance bool
-		accumulator []byte
+		inUtterance    bool
+		accumulator    []byte
+		rawSpeechCount int
 	)
 
 	for f := range frames {
@@ -137,6 +154,10 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 			if !inUtterance {
 				inUtterance = true
 				accumulator = accumulator[:0]
+				rawSpeechCount = 0
+			}
+			if energyVAD != nil && energyVAD.LastRawSpeech() {
+				rawSpeechCount++
 			}
 			if m.onUtterance != nil {
 				accumulator = append(accumulator, f.PCM...)
@@ -144,7 +165,9 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 				// stuck VAD (or a genuinely long speech burst) produces
 				// bounded chunks instead of one giant clip. Stay in
 				// utterance: subsequent frames keep accumulating into a
-				// fresh buffer.
+				// fresh buffer. The min-speech gate is intentionally
+				// not consulted here — anything that ran long enough to
+				// hit the cap is unambiguously speech.
 				if m.maxUtteranceBytes > 0 && len(accumulator) >= m.maxUtteranceBytes {
 					utterance := make([]byte, len(accumulator))
 					copy(utterance, accumulator)
@@ -160,13 +183,21 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 			if inUtterance {
 				inUtterance = false
 				if m.onUtterance != nil && len(accumulator) > 0 {
-					// Hand off a copy — the next utterance reuses the
-					// accumulator's backing array.
-					utterance := make([]byte, len(accumulator))
-					copy(utterance, accumulator)
-					m.onUtterance(utterance)
+					if m.minRawSpeechFrames > 0 && rawSpeechCount < m.minRawSpeechFrames {
+						m.log.Info("audio.utterance dropped: below min-speech-frames",
+							"raw_speech_frames", rawSpeechCount,
+							"min", m.minRawSpeechFrames,
+							"audio_ms", utterance_ms(len(accumulator)))
+					} else {
+						// Hand off a copy — the next utterance reuses the
+						// accumulator's backing array.
+						utterance := make([]byte, len(accumulator))
+						copy(utterance, accumulator)
+						m.onUtterance(utterance)
+					}
 				}
 				accumulator = accumulator[:0]
+				rawSpeechCount = 0
 			}
 		}
 		if energyVAD != nil {

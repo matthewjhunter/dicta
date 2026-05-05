@@ -172,6 +172,143 @@ func TestAudioMonitor_MaxUtteranceCap_ForceSplits(t *testing.T) {
 	}
 }
 
+// TestAudioMonitor_MinSpeechFramesGate_DropsBlip is the regression test
+// for the "Thank you" hallucination on session-open. A single frame of
+// loud audio followed by 800 ms of hangover silence used to be emitted
+// as an ~880 ms utterance, which Whisper-family backends transcribed as
+// "Thank you" / "Thanks for watching" / "you". With the gate set to
+// require ≥3 raw-speech frames, the blip must be dropped before
+// reaching ASR; a longer real utterance must still pass through.
+func TestAudioMonitor_MinSpeechFramesGate_DropsBlip(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	fc := newFakeCapture()
+	mon := &audioMonitor{
+		cap: fc,
+		// Short calibration + short hangover so the test stays compact;
+		// the gate logic doesn't depend on either being default.
+		vad: audio.NewEnergyVAD(audio.VADConfig{
+			Calibrate: 80 * time.Millisecond,
+			Hangover:  240 * time.Millisecond,
+		}),
+		rb:  audio.NewRingBuffer(audio.CapacityForSeconds(5)),
+		log: logger,
+	}
+	mon.SetMinRawSpeechFrames(3)
+	mon.backend.Store("")
+
+	var (
+		emissions [][]byte
+		emitMu    sync.Mutex
+	)
+	mon.onUtterance = func(pcm []byte) {
+		emitMu.Lock()
+		defer emitMu.Unlock()
+		captured := make([]byte, len(pcm))
+		copy(captured, pcm)
+		emissions = append(emissions, captured)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := mon.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	loud := loudFrame(0.6)
+	silent := make([]byte, audio.FrameBytes)
+
+	// Phase 1: calibration + 1-frame blip (this is what hallucinates).
+	fc.send(silent)
+	fc.send(silent) // 160 ms — beyond the 80 ms calibration
+	fc.send(loud)   // single raw-speech frame
+	// Hangover-window silence: VAD reports speech under hangover, raw
+	// stays false. After 240 ms (3 frames) hangover expires.
+	for range 4 {
+		fc.send(silent)
+	}
+
+	// Phase 2: 5 raw-speech frames in a row — clearly past the gate.
+	for range 5 {
+		fc.send(loud)
+	}
+	for range 4 {
+		fc.send(silent)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		emitMu.Lock()
+		n := len(emissions)
+		emitMu.Unlock()
+		if n >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if err := mon.Stop(); err != nil {
+		t.Errorf("Stop: %v", err)
+	}
+
+	emitMu.Lock()
+	defer emitMu.Unlock()
+	if len(emissions) != 1 {
+		t.Fatalf("expected exactly 1 emission (blip dropped, real speech kept); got %d", len(emissions))
+	}
+	// Sanity: the surviving emission must be the longer one. 5 raw +
+	// 3 hangover frames = 8 frames * FrameBytes minimum; allow some
+	// slack for scheduling-induced extras.
+	minBytes := 5 * audio.FrameBytes
+	if len(emissions[0]) < minBytes {
+		t.Errorf("surviving emission length %d < expected real-speech min %d",
+			len(emissions[0]), minBytes)
+	}
+}
+
+// fakeCapture is a hand-driven audio.Capture for tests that need to
+// control the exact frame sequence the audioMonitor.loop sees. The
+// frame channel is closed when the Start ctx is cancelled (matching
+// SubprocessCapture's contract), so audioMonitor.Stop returns cleanly.
+type fakeCapture struct {
+	frames    chan audio.Frame
+	closeOnce sync.Once
+}
+
+func newFakeCapture() *fakeCapture {
+	return &fakeCapture{frames: make(chan audio.Frame, 64)}
+}
+
+func (f *fakeCapture) Start(ctx context.Context) (<-chan audio.Frame, error) {
+	go func() {
+		<-ctx.Done()
+		f.closeOnce.Do(func() { close(f.frames) })
+	}()
+	return f.frames, nil
+}
+
+func (f *fakeCapture) Stop() error {
+	f.closeOnce.Do(func() { close(f.frames) })
+	return nil
+}
+
+func (f *fakeCapture) Backend() string { return "fake" }
+
+func (f *fakeCapture) send(pcm []byte) {
+	dup := make([]byte, len(pcm))
+	copy(dup, pcm)
+	f.frames <- audio.Frame{PCM: dup, Timestamp: time.Now()}
+}
+
+func loudFrame(amp float64) []byte {
+	pcm := make([]byte, audio.FrameBytes)
+	for i := range audio.FrameSamples {
+		v := amp * math.Sin(2*math.Pi*440*float64(i)/audio.SampleRateHz)
+		s := int16(v * 32767)
+		binary.LittleEndian.PutUint16(pcm[i*2:], uint16(s))
+	}
+	return pcm
+}
+
 // writeContinuousTonePCM writes 100 ms of silence followed by `seconds`
 // seconds of 440 Hz tone. The leading silence lets the VAD calibrate.
 func writeContinuousTonePCM(path string, seconds int) error {

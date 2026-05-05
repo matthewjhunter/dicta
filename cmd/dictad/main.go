@@ -67,6 +67,7 @@ func main() {
 	vadHangoverFlag := flag.Duration("vad-hangover", 800*time.Millisecond, "VAD continuous-silence threshold to declare end-of-utterance")
 	vadMarginDBFlag := flag.Float64("vad-margin-db", 6, "VAD speech threshold = noise floor + this many dB; raise if ambient noise causes spurious speech detection")
 	vadMaxUtteranceFlag := flag.Duration("vad-max-utterance", 10*time.Second, "hard cap on a single utterance's duration; force-emits and starts a new chunk on overflow (0 disables)")
+	vadMinSpeechMSFlag := flag.Duration("vad-min-speech-ms", 400*time.Millisecond, "minimum raw-energy speech duration per utterance (in 80ms frames); shorter blips are dropped before reaching ASR to suppress Whisper hallucinations like \"Thank you\" (0 disables)")
 	asrTranscribeTimeoutFlag := flag.Duration("asr-transcribe-timeout", 30*time.Second, "per-utterance Transcribe deadline; raise for slow CPUs / large models")
 	asrMaxConcurrentFlag := flag.Int("asr-max-concurrent", 2, "max concurrent in-flight Transcribe calls; utterances beyond this are dropped with a WARN")
 	flag.Parse()
@@ -105,6 +106,10 @@ func main() {
 		if *vadMaxUtteranceFlag > 0 {
 			capBytes := int(vadMaxUtteranceFlag.Seconds() * float64(audio.SampleRateHz*audio.SampleWidth))
 			audioMon.SetMaxUtterance(capBytes)
+		}
+		if *vadMinSpeechMSFlag > 0 {
+			frames := max(int(*vadMinSpeechMSFlag/audio.FrameDuration), 1)
+			audioMon.SetMinRawSpeechFrames(frames)
 		}
 	}
 
