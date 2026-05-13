@@ -179,6 +179,10 @@ func main() {
 	// not_implemented and the daemon stays useful only for status.
 	var sess *session
 	if audioMon != nil && handler.asr != nil {
+		if err := ensureExecutable("ydotool-binary", *ydotoolBinaryFlag); err != nil {
+			logger.Error("dispatch.typer", "err", err)
+			os.Exit(1)
+		}
 		typer, err := dispatch.NewSubprocessTyper(dispatch.TyperConfig{
 			Binary:     *ydotoolBinaryFlag,
 			Socket:     *ydotoolSocketFlag,
@@ -201,6 +205,14 @@ func main() {
 		var clipper dispatch.Clipper
 		var preview previewController
 		if *previewBinaryFlag != "" {
+			if err := ensureExecutable("wl-copy-binary", *wlCopyBinaryFlag); err != nil {
+				logger.Error("dispatch.clipper", "err", err)
+				os.Exit(1)
+			}
+			if err := ensureExecutable("preview-binary", *previewBinaryFlag); err != nil {
+				logger.Error("preview.controller", "err", err)
+				os.Exit(1)
+			}
 			cl, err := dispatch.NewSubprocessClipper(dispatch.ClipperConfig{
 				Binary: *wlCopyBinaryFlag,
 				Logger: logger,
