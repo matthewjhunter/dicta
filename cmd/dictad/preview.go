@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -73,7 +74,7 @@ func newPreviewProc(cfg previewConfig) (*previewProc, error) {
 	}
 	allowlist := cfg.BinaryAllowlist
 	if len(allowlist) == 0 {
-		allowlist = []string{"/usr/bin", "/usr/local/bin", "/opt"}
+		allowlist = defaultPreviewAllowlist()
 	}
 	if err := previewPathOnAllowlist(cfg.Binary, allowlist); err != nil {
 		return nil, fmt.Errorf("preview: Binary: %w", err)
@@ -200,6 +201,19 @@ func (p *previewProc) OnExit(fn func()) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.onExit = fn
+}
+
+// defaultPreviewAllowlist is the set of allowed prefixes for the
+// dicta-preview binary. System paths are listed for distro-packaged
+// installs; $HOME/.local/bin is included because `task install:user`
+// (the documented user-install path) places the binary there alongside
+// dictad and dicta.
+func defaultPreviewAllowlist() []string {
+	allow := []string{"/usr/bin", "/usr/local/bin", "/opt"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		allow = append(allow, filepath.Join(home, ".local", "bin"))
+	}
+	return allow
 }
 
 func previewPathOnAllowlist(path string, allowlist []string) error {
