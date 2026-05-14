@@ -144,27 +144,44 @@ func (m *asrMonitor) Stop() {
 // utterance is dropped with a WARN — better than queueing audio that
 // will arrive minutes late.
 //
-// onTranscript, if non-nil, is invoked with the trimmed transcript and
-// associated metadata after a successful transcription. It runs on the
-// same goroutine as the Transcribe call, so a slow handler will hold an
-// inflight slot — keep it cheap (the production path hands off to a
-// Typer.Type that internally chunks and sleeps, or to a cleanup HTTP
-// call bounded by its own timeout).
-func (m *asrMonitor) OnUtterance(pcm []byte, onTranscript func(transcriptResult)) {
+// onTranscript is invoked with the trimmed transcript on a successful
+// transcription. onSkip is invoked in every other case — concurrency
+// cap, empty PCM, transcribe error, hallucination/repetition filter
+// drop. Exactly one of the two callbacks fires per non-empty PCM
+// submission, which lets the session-side worker safely allocate a
+// typing-queue slot in submission order and unblock it when the
+// asrMonitor has finished with the audio. Both callbacks are
+// optional.
+//
+// Both callbacks run on the same goroutine as the Transcribe call,
+// so a slow handler will hold an inflight slot — keep them cheap.
+func (m *asrMonitor) OnUtterance(pcm []byte, onTranscript func(transcriptResult), onSkip func()) {
 	if len(pcm) == 0 {
+		if onSkip != nil {
+			onSkip()
+		}
 		return
 	}
 	select {
 	case m.inflight <- struct{}{}:
 	default:
 		m.logger.Warn("asr.utterance dropped: at concurrency cap", "max", m.cfg.MaxConcurrent)
+		if onSkip != nil {
+			onSkip()
+		}
 		return
 	}
-	go m.transcribe(pcm, onTranscript)
+	go m.transcribe(pcm, onTranscript, onSkip)
 }
 
-func (m *asrMonitor) transcribe(pcm []byte, onTranscript func(transcriptResult)) {
+func (m *asrMonitor) transcribe(pcm []byte, onTranscript func(transcriptResult), onSkip func()) {
 	defer func() { <-m.inflight }()
+	skipped := true
+	defer func() {
+		if skipped && onSkip != nil {
+			onSkip()
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.TranscribeTimeout)
 	defer cancel()
 
@@ -210,7 +227,11 @@ func (m *asrMonitor) transcribe(pcm []byte, onTranscript func(transcriptResult))
 		"utterance_id", uttID,
 		"audio_ms", int(time.Duration(len(pcm))/time.Duration(2*16)),
 		"duration_ms", dur.Milliseconds())
-	if onTranscript != nil && text != "" {
+	if text == "" {
+		return
+	}
+	skipped = false
+	if onTranscript != nil {
 		onTranscript(transcriptResult{
 			Text:         text,
 			UtteranceID:  uttID,

@@ -23,10 +23,27 @@ type fakeASR struct {
 	healthErr      error
 	transcript     asrclient.Transcript
 	transcribeWait time.Duration
+
+	// perCall, when non-nil, overrides transcript/wait/error per call.
+	// The argument is the 1-indexed call number. Lets ordering tests
+	// give the second call a shorter delay than the first to simulate
+	// a small fast utterance completing before a large slow one.
+	perCall func(callNum uint64) (asrclient.Transcript, time.Duration, error)
 }
 
 func (f *fakeASR) Transcribe(ctx context.Context, _ []byte, _ asrclient.Options) (asrclient.Transcript, error) {
-	f.transcribeCall.Add(1)
+	n := f.transcribeCall.Add(1)
+	if f.perCall != nil {
+		tr, wait, err := f.perCall(n)
+		if wait > 0 {
+			select {
+			case <-ctx.Done():
+				return asrclient.Transcript{}, ctx.Err()
+			case <-time.After(wait):
+			}
+		}
+		return tr, err
+	}
 	if f.transcribeWait > 0 {
 		select {
 		case <-ctx.Done():
@@ -60,7 +77,7 @@ func TestASRMonitor_OnUtteranceTranscribesAndCounts(t *testing.T) {
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
-	m.OnUtterance(make([]byte, 1280), nil)
+	m.OnUtterance(make([]byte, 1280), nil, nil)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -84,8 +101,8 @@ func TestASRMonitor_DropsEmptyUtterance(t *testing.T) {
 		BackendName:    "fake",
 		HealthInterval: time.Hour,
 	})
-	m.OnUtterance(nil, nil)
-	m.OnUtterance([]byte{}, nil)
+	m.OnUtterance(nil, nil, nil)
+	m.OnUtterance([]byte{}, nil, nil)
 	time.Sleep(20 * time.Millisecond)
 	if got := f.transcribeCall.Load(); got != 0 {
 		t.Errorf("expected no Transcribe calls, got %d", got)
@@ -100,7 +117,7 @@ func TestASRMonitor_RecordsTranscribeError(t *testing.T) {
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     1,
 	})
-	m.OnUtterance(make([]byte, 1280), nil)
+	m.OnUtterance(make([]byte, 1280), nil, nil)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -127,8 +144,8 @@ func TestASRMonitor_DropsAtConcurrencyCap(t *testing.T) {
 	})
 
 	// Submit two utterances back-to-back. The second must be dropped.
-	m.OnUtterance(make([]byte, 1280), nil)
-	m.OnUtterance(make([]byte, 1280), nil)
+	m.OnUtterance(make([]byte, 1280), nil, nil)
+	m.OnUtterance(make([]byte, 1280), nil, nil)
 
 	time.Sleep(200 * time.Millisecond)
 	if got := f.transcribeCall.Load(); got != 1 {
@@ -231,7 +248,7 @@ func TestASRMonitor_DropsHallucinationPhrase(t *testing.T) {
 			var fired atomic.Bool
 			m.OnUtterance(make([]byte, 1280), func(transcriptResult) {
 				fired.Store(true)
-			})
+			}, nil)
 
 			deadline := time.Now().Add(2 * time.Second)
 			for time.Now().Before(deadline) {
@@ -305,7 +322,7 @@ func TestASRMonitor_DropsRepetitionLoop(t *testing.T) {
 			var fired atomic.Bool
 			m.OnUtterance(make([]byte, 1280), func(transcriptResult) {
 				fired.Store(true)
-			})
+			}, nil)
 
 			deadline := time.Now().Add(2 * time.Second)
 			for time.Now().Before(deadline) {

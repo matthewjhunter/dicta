@@ -46,7 +46,7 @@ func TestEndToEnd_AudioToASR(t *testing.T) {
 	audioMon := newAudioMonitor(discardLogger(),
 		audio.CaptureConfig{Backend: audio.BackendPipeWire},
 		audio.VADConfig{Calibrate: 100 * time.Millisecond})
-	audioMon.onUtterance = func(pcm []byte) { asrMon.OnUtterance(pcm, nil) }
+	audioMon.onUtterance = func(pcm []byte) { asrMon.OnUtterance(pcm, nil, nil) }
 
 	if err := audioMon.Start(t.Context()); err != nil {
 		t.Fatalf("audio.Start: %v", err)

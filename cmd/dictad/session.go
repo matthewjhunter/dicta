@@ -77,24 +77,42 @@ type session struct {
 	mode  sessionMode
 	open  bool
 	epoch uint64
-	// typedInSession counts successful type-mode dispatches in the
-	// currently-open session. The second utterance and beyond get a
-	// leading space prepended so consecutive transcripts don't collide
-	// at sentence boundaries (e.g. "Hello." + "World." -> "Hello. World.").
-	// Reset on every open_().
-	typedInSession uint64
 
-	// typeMu serializes type-mode dispatch within a single session.
-	// Whisper transcripts can complete while the previous transcript is
-	// still being typed character-by-character through ydotool (60 ms/
-	// key × tens of chars per utterance > inter-utterance gap).
-	// Without this lock the asrMonitor's parallel transcribe goroutines
-	// would race two ydotool subprocesses, both writing to uinput at
-	// once — the kernel sees a single interleaved keystream and the
-	// user sees scrambled text. typeMu also guards the typedInSession
-	// read-modify-write so the leading-space decision is atomic with
-	// the dispatch it's based on.
-	typeMu sync.Mutex
+	// typeQueue carries type-mode jobs to a single worker goroutine
+	// that dispatches them to ydotool in submission order. A mutex
+	// alone wouldn't suffice: asrMonitor.MaxConcurrent allows multiple
+	// transcribe goroutines, and Whisper latency varies per utterance,
+	// so a small fast utterance can complete *and acquire a mutex*
+	// before a large slow one that was submitted earlier — producing
+	// out-of-order typing. A FIFO channel preserves submission order;
+	// running a single worker also rules out two ydotool subprocesses
+	// racing events into uinput (which produced "gibberish in the
+	// middle" character-interleaving in earlier sessions).
+	//
+	// Buffered to absorb bursts where typing falls behind transcription
+	// (long ydotool dispatch + several short utterances back-to-back).
+	// If even this fills up, the OnUtterance callback drops with a
+	// WARN — better than scrambled output.
+	typeQueue      chan *typeJob
+	typeShutdown   sync.Once
+	typeWorkerDone chan struct{}
+}
+
+// typeJob is one unit of work for the type-mode worker. It is
+// allocated and enqueued at OnUtterance entry, BEFORE the asrMonitor
+// transcribe goroutine starts, so the queue order matches submission
+// order even when transcribes complete out of order under load. The
+// asrMonitor callbacks (onTranscript on success, onSkip on
+// drop/error/filter) populate text and close ready; the worker
+// blocks on ready before deciding whether to type.
+//
+// text is empty if the utterance was skipped — concurrency cap,
+// transcribe error, hallucination/repetition filter, or session
+// epoch drift between submission and transcript callback.
+type typeJob struct {
+	epoch uint64
+	text  string
+	ready chan struct{}
 }
 
 // ErrClipNotConfigured is returned when a clip-mode toggle fires but
@@ -142,7 +160,80 @@ func newSession(logger *slog.Logger, typer dispatch.Typer, clipper dispatch.Clip
 			_ = s.close(daemonCtx, "panel-exited")
 		})
 	}
+
+	// Start the type-mode dispatch worker. One per session-instance.
+	// Buffer size 8: enough headroom for ~8 short utterances stacking
+	// up while a long one is mid-type. Beyond that the OnUtterance
+	// callback will drop with a WARN — backpressure surfaced to the
+	// user as a visible "queue full" log rather than scrambled output.
+	s.typeQueue = make(chan *typeJob, 8)
+	s.typeWorkerDone = make(chan struct{})
+	go s.typeWorker()
 	return s
+}
+
+// typeWorker dispatches type-mode jobs in submission order. Exits when
+// daemonCtx is cancelled or typeQueue is closed (whichever comes
+// first). The worker tracks typedInEpoch privately — the leading-space
+// decision for every utterance after the first in a session lives
+// inside this single goroutine, so there's no shared-state race
+// between the read and the increment that gates it.
+func (s *session) typeWorker() {
+	defer close(s.typeWorkerDone)
+	var currentEpoch uint64
+	var initialized bool
+	var typedInEpoch uint64
+	for {
+		select {
+		case <-s.daemonCtx.Done():
+			return
+		case job, ok := <-s.typeQueue:
+			if !ok {
+				return
+			}
+			// Reset per-epoch typed counter when we cross an epoch
+			// boundary. Done before the readiness wait so the counter
+			// state matches the job's epoch even if we end up
+			// skipping (no leading space credit).
+			if !initialized || job.epoch != currentEpoch {
+				currentEpoch = job.epoch
+				typedInEpoch = 0
+				initialized = true
+			}
+			// Wait for the asrMonitor to finish with this utterance.
+			// onTranscript fills text + closes ready; onSkip just
+			// closes ready with text empty. Daemon shutdown is the
+			// only way out short of the asrMon resolving.
+			select {
+			case <-s.daemonCtx.Done():
+				return
+			case <-job.ready:
+			}
+			if job.text == "" {
+				continue
+			}
+			// Re-check the session epoch: if the session has closed
+			// or reopened between submission and this dequeue, the
+			// transcript belongs to a session the user no longer
+			// considers active. Drop without typing.
+			s.mu.Lock()
+			liveEpoch := s.epoch
+			liveOpen := s.open
+			s.mu.Unlock()
+			if !liveOpen || liveEpoch != job.epoch {
+				continue
+			}
+			text := job.text
+			if typedInEpoch > 0 {
+				text = " " + text
+			}
+			if err := s.typer.Type(s.daemonCtx, text); err != nil {
+				s.logger.Warn("session.type dispatch failed", "err", err)
+				continue
+			}
+			typedInEpoch++
+		}
+	}
 }
 
 // Toggle implements the Pause/Scroll Lock semantics: if a session of
@@ -228,7 +319,6 @@ func (s *session) open_(ctx context.Context, mode sessionMode) error {
 	s.epoch++
 	s.mode = mode
 	s.open = true
-	s.typedInSession = 0
 	epoch := s.epoch
 	s.mu.Unlock()
 
@@ -352,11 +442,20 @@ func (s *session) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	open := s.open
 	s.mu.Unlock()
-	if !open {
-		return nil
+
+	var err error
+	if open {
+		s.logger.Info("session.shutdown: closing open session before exit")
+		err = s.close(ctx, "shutdown")
 	}
-	s.logger.Info("session.shutdown: closing open session before exit")
-	return s.close(ctx, "shutdown")
+
+	// Stop the typing worker. Idempotent — sync.Once guards repeat
+	// Shutdown calls (the test suite exercises that path).
+	s.typeShutdown.Do(func() {
+		close(s.typeQueue)
+	})
+	<-s.typeWorkerDone
+	return err
 }
 
 // publishState emits a session_state event on the bus. Calls without a
@@ -400,54 +499,66 @@ func (s *session) OnUtterance(pcm []byte) {
 		return
 	}
 
-	s.asrMon.OnUtterance(pcm, func(tr transcriptResult) {
-		s.mu.Lock()
-		current := s.epoch
-		stillOpen := s.open && s.mode == mode
-		s.mu.Unlock()
-		if !stillOpen || current != epoch {
-			s.logger.Info("session.transcript dropped: session changed",
-				"submit_epoch", epoch, "current_epoch", current, "text_len", len(tr.Text))
+	// In type-mode, pre-allocate the typing job and enqueue it BEFORE
+	// submitting to the asrMonitor. This is what guarantees typing
+	// happens in submission order even when transcribe goroutines
+	// (running in parallel up to MaxConcurrent) complete out of order
+	// — e.g. a short, fast-Whisper utterance that follows a long,
+	// slow-Whisper one would otherwise type first under a plain mutex.
+	// The typeJob's ready channel is closed by exactly one of the
+	// asrMonitor callbacks below (onTranscript on success, onSkip on
+	// drop / error / filter), unblocking the worker.
+	var job *typeJob
+	if mode == modeType {
+		job = &typeJob{epoch: epoch, ready: make(chan struct{})}
+		select {
+		case s.typeQueue <- job:
+		default:
+			s.logger.Warn("session.type queue full; dropping utterance",
+				"audio_bytes", len(pcm))
 			return
 		}
+	}
 
-		var cleanupLatencyMs int64
-		var cleaned string
-		switch mode {
-		case modeType:
-			cleaned = tr.Text
-			s.publishTranscript(tr, tr.Text)
-			// typeMu serializes ydotool dispatch across utterances —
-			// two concurrent Type() calls would let two ydotool
-			// subprocesses race events into uinput and produce
-			// character-interleaved gibberish. The typedInSession
-			// read and increment also live under this lock so the
-			// leading-space decision is consistent with the dispatch
-			// it gates.
-			s.typeMu.Lock()
+	s.asrMon.OnUtterance(pcm,
+		func(tr transcriptResult) {
 			s.mu.Lock()
-			typed := tr.Text
-			if s.typedInSession > 0 {
-				typed = " " + tr.Text
-			}
+			current := s.epoch
+			stillOpen := s.open && s.mode == mode
 			s.mu.Unlock()
-			err := s.typer.Type(s.daemonCtx, typed)
-			if err == nil {
-				s.mu.Lock()
-				s.typedInSession++
-				s.mu.Unlock()
+			if !stillOpen || current != epoch {
+				s.logger.Info("session.transcript dropped: session changed",
+					"submit_epoch", epoch, "current_epoch", current, "text_len", len(tr.Text))
+				if job != nil {
+					close(job.ready)
+				}
+				return
 			}
-			s.typeMu.Unlock()
-			if err != nil {
-				s.logger.Warn("session.type dispatch failed", "err", err)
-			}
-		case modeClip:
-			cleaned, cleanupLatencyMs = s.runCleanup(tr.Text)
-			s.publishTranscript(tr, cleaned)
-		}
 
-		s.recordAudit(mode, tr, cleaned, cleanupLatencyMs)
-	})
+			var cleanupLatencyMs int64
+			var cleaned string
+			switch mode {
+			case modeType:
+				cleaned = tr.Text
+				s.publishTranscript(tr, tr.Text)
+				job.text = tr.Text
+				close(job.ready)
+			case modeClip:
+				cleaned, cleanupLatencyMs = s.runCleanup(tr.Text)
+				s.publishTranscript(tr, cleaned)
+			}
+
+			s.recordAudit(mode, tr, cleaned, cleanupLatencyMs)
+		},
+		func() {
+			// onSkip fires for asrMon-side drops (concurrency cap,
+			// transcribe error, hallucination/repetition filter). For
+			// type-mode that means the queued job will never get
+			// text — close ready so the worker advances past it.
+			if job != nil {
+				close(job.ready)
+			}
+		})
 }
 
 // runCleanup runs the mechanical profile on raw and returns the cleaned

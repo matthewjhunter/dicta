@@ -1133,14 +1133,128 @@ func TestSession_TypeModeSerializesDispatch(t *testing.T) {
 	}
 
 	// Bonus: the second transcript should have a leading space (the
-	// typedInSession check runs under the same lock so this assertion
-	// is unambiguous).
+	// typedInEpoch counter is incremented after the first successful
+	// Type and read for the second).
 	calls := typer.Calls()
 	if calls[0] != "hello" {
 		t.Errorf("first Type: got %q want %q", calls[0], "hello")
 	}
 	if calls[1] != " hello" {
-		t.Errorf("second Type: got %q want %q (leading space for typedInSession>0)", calls[1], " hello")
+		t.Errorf("second Type: got %q want %q (leading space for typedInEpoch>0)", calls[1], " hello")
+	}
+}
+
+// TestSession_TypeModeOrdering guards the ordering invariant that a
+// plain serialization mutex would NOT provide: when transcribe
+// completion order differs from submission order (variable Whisper
+// latency on different-length audio), the typing must still happen
+// in submission order.
+//
+// Setup: u1 is submitted first with a 100ms transcribe delay, u2 is
+// submitted second with a 10ms delay. Without pre-allocating the
+// typing slot at submission time, u2's transcribe completes first
+// and would acquire any mutex first, typing "second" before "first".
+// The futures-style queue (slot allocated synchronously in
+// OnUtterance, ready channel closed by the asrMon callback) ensures
+// the worker processes u1's slot first regardless of which
+// transcribe callback fires earlier.
+func TestSession_TypeModeOrdering(t *testing.T) {
+	typer := &fakeTyper{}
+	cuer := &fakeCuer{}
+	asrFake := &fakeASR{
+		perCall: func(n uint64) (asrclient.Transcript, time.Duration, error) {
+			switch n {
+			case 1:
+				return asrclient.Transcript{Text: "first"}, 100 * time.Millisecond, nil
+			default:
+				return asrclient.Transcript{Text: "second"}, 10 * time.Millisecond, nil
+			}
+		},
+	}
+	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
+		BackendName:       "fake",
+		HealthInterval:    time.Hour,
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     2,
+	})
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, nil, t.Context())
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tiny gap between submissions so transcribe goroutines start in
+	// order — the test exercises completion-order != submission-order,
+	// not start-order races.
+	s.OnUtterance(make([]byte, 1280))
+	time.Sleep(5 * time.Millisecond)
+	s.OnUtterance(make([]byte, 1280))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(typer.Calls()) >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	calls := typer.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 Type calls, got %d", len(calls))
+	}
+	if calls[0] != "first" {
+		t.Errorf("first Type: got %q want %q (submission order must win over completion order)", calls[0], "first")
+	}
+	if calls[1] != " second" {
+		t.Errorf("second Type: got %q want %q", calls[1], " second")
+	}
+}
+
+// TestSession_TypeModeSkipDoesNotBlockNext guards against the
+// queue-stall failure mode: if utterance N is filtered by the
+// asrMonitor (hallucination phrase, repetition loop, or transcribe
+// error), the worker must still advance past it and type utterance
+// N+1. The asrMonitor's onSkip callback wires this up by closing
+// the typeJob's ready channel even when no transcript is delivered.
+func TestSession_TypeModeSkipDoesNotBlockNext(t *testing.T) {
+	typer := &fakeTyper{}
+	cuer := &fakeCuer{}
+	calls := atomic.Uint64{}
+	asrFake := &fakeASR{
+		perCall: func(_ uint64) (asrclient.Transcript, time.Duration, error) {
+			n := calls.Add(1)
+			if n == 1 {
+				// First utterance: transcribe error → asrMon onSkip.
+				return asrclient.Transcript{}, 0, errors.New("simulated transcribe failure")
+			}
+			return asrclient.Transcript{Text: "hello"}, 0, nil
+		},
+	}
+	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
+		BackendName:       "fake",
+		HealthInterval:    time.Hour,
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     2,
+	})
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, nil, t.Context())
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatal(err)
+	}
+
+	s.OnUtterance(make([]byte, 1280))
+	time.Sleep(5 * time.Millisecond)
+	s.OnUtterance(make([]byte, 1280))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(typer.Calls()) >= 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	got := typer.Calls()
+	if len(got) != 1 || got[0] != "hello" {
+		t.Errorf("expected one Type call \"hello\" (first utterance skipped, second typed); got %v", got)
 	}
 }
 
