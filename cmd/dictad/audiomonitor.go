@@ -47,6 +47,12 @@ type audioMonitor struct {
 	// the asrMonitor's OnUtterance goroutine-spawns its work.
 	onUtterance func(pcm []byte)
 
+	// onFrame is invoked for every captured PCM frame, before VAD
+	// classification. Used by the mute watcher (unmute-to-dictate) to
+	// detect hardware mute via all-zero PCM. Must be cheap and
+	// non-blocking — runs on the audio pump goroutine.
+	onFrame func(pcm []byte)
+
 	// stats — atomic to keep the read in Snapshot() lock-free. EnergyVAD
 	// itself is documented as single-goroutine, so noiseFloor is mirrored
 	// out from inside loop() rather than read directly.
@@ -147,6 +153,9 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 	for f := range frames {
 		m.rb.Push(f)
 		m.frames.Add(1)
+		if m.onFrame != nil {
+			m.onFrame(f.PCM)
+		}
 		speech := m.vad.IsSpeech(f)
 		m.lastSpeech.Store(speech)
 		if speech {

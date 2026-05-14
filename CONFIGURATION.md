@@ -57,6 +57,69 @@ case-insensitive) as a backstop for blips that slip past the VAD gate.
 There is no flag for this; the list is intentionally narrow to avoid
 suppressing real one-word utterances.
 
+### Disfluency stripping
+
+Whisper-family models commonly include filler tokens ("uh", "um", "hmm")
+inside otherwise-real transcripts and trailing ellipsis runs ("...")
+when the audio tails into silence. dictad strips both at the ASR layer,
+before the hallucination check, so type-mode and clip-mode both benefit.
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `--strip-disfluencies` | `uh,uhh,uhhh,um,umm,ummm,uhm,er,erm,hmm,hmmm` | Comma-separated list of literal tokens to strip from every transcript. Case-insensitive, word-boundary matched (so `umbrella`, `Sarah`, `summer` are safe). Empty string disables stripping. |
+
+Trailing ellipsis runs (`..`, `...`, `…`) are always trimmed regardless
+of the strip list. A single trailing `.` is preserved as legitimate
+sentence punctuation.
+
+Real words that double as fillers in conversation (`ah`, `well`, `like`,
+`you know`) are intentionally absent from the default list — stripping
+them risks deleting intended content. Add them via `--strip-disfluencies`
+at your own risk.
+
+## Unmute-to-dictate (optional)
+
+A second activation path alongside the Pause keystroke: the daemon
+watches the audio stream for the mic transitioning between muted and
+unmuted, and opens type-mode on unmute / closes it on mute.
+
+**Hardware compatibility caveat.** The detector relies on the mic
+emitting **literal zero PCM samples** while muted — every byte of every
+captured frame must be 0x00, not "very quiet noise" or "attenuated
+audio". Only this perfect-zero behavior gives the unambiguous gap
+between muted and unmuted that lets the watcher avoid threshold tuning
+and false positives.
+
+The feature has been developed and tuned against exactly one mic so
+far: the **MXL AC-44 TAP** (USB, touch-mute button on the unit, gates
+audio in device firmware). It is **untested on every other mic** and
+will silently misbehave on any mic whose mute leaves a noise floor
+above zero — the watcher will see "unmuted" indefinitely and the
+feature won't fire. If you're on something other than the AC-44,
+verify with a quick probe before enabling: capture a few seconds of
+"muted" audio (e.g. via `pw-record`) and confirm every sample is
+exactly zero. If you see any nonzero values, leave this feature off.
+
+A future iteration may add a configurable amplitude threshold so mics
+that mute by silencing-but-not-zeroing become detectable, but until
+that exists, this is a single-mic feature.
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `--unmute-to-dictate` | `false` | Enable the watcher. Requires `--audio-monitor` (the watcher consumes the same frame stream). When the configured mic transitions muted→unmuted, the daemon opens type-mode as if you'd pressed Pause; on unmuted→muted it closes a type-mode session. Clip-mode sessions are never disturbed by the watcher — an explicit Scroll Lock gesture always wins. |
+| `--unmute-to-dictate-debounce` | `1s` | Minimum duration a transition must persist before firing. Suppresses single-frame glitches. Rounded down to whole 80 ms frames; values < 80 ms clamp to one frame. |
+
+The Pause key remains active in parallel — both activation paths route
+to the same session state machine, so you can still toggle manually.
+The watcher fires only on real transitions, so a manual Pause-close
+won't get immediately undone by the watcher unless you actually toggle
+the mute switch.
+
+Startup state is sampled, not assumed: the first audio frame after
+daemon start seeds the watcher's baseline without firing a transition,
+so the daemon won't open a session at boot just because the mic
+happens to be unmuted.
+
 ## ASR backend
 
 ```

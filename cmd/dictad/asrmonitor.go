@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,6 +73,12 @@ type asrMonitorConfig struct {
 	HealthTimeout     time.Duration
 	TranscribeTimeout time.Duration
 	MaxConcurrent     int
+
+	// DisfluencyRE, when non-nil, is applied to every successful
+	// transcript before hallucination/repetition filters run. nil
+	// disables word-level stripping; trailing-ellipsis trim still
+	// runs (it's not gated by the strip list).
+	DisfluencyRE *regexp.Regexp
 }
 
 func (c asrMonitorConfig) withDefaults() asrMonitorConfig {
@@ -173,6 +180,13 @@ func (m *asrMonitor) transcribe(pcm []byte, onTranscript func(transcriptResult))
 		return
 	}
 	text := strings.TrimSpace(tr.Text)
+	if cleaned := stripDisfluencies(text, m.cfg.DisfluencyRE); cleaned != text {
+		m.logger.Debug("asr.transcript stripped",
+			"raw", text,
+			"clean", cleaned,
+			"audio_ms", int(time.Duration(len(pcm))/time.Duration(2*16)))
+		text = cleaned
+	}
 	if isWhisperHallucination(text) {
 		m.logger.Info("asr.transcript dropped: hallucination phrase",
 			"text", text,

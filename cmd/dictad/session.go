@@ -177,6 +177,36 @@ func (s *session) Toggle(ctx context.Context, mode string) error {
 	}
 }
 
+// EnsureTypeOpen is the unmute-to-dictate hook: open type-mode if no
+// session is currently active. If a session is already open in either
+// mode the call is a no-op — an explicit clip-mode session must not
+// be interrupted by an inferred mic-state event.
+//
+// Returns nil on no-op and on successful open.
+func (s *session) EnsureTypeOpen(ctx context.Context) error {
+	s.mu.Lock()
+	open := s.open
+	s.mu.Unlock()
+	if open {
+		return nil
+	}
+	return s.open_(ctx, modeType)
+}
+
+// CloseIfTypeOpen is the mic-muted hook: close the session iff it is
+// currently open in type-mode. A clip-mode session is left alone (see
+// EnsureTypeOpen rationale); a closed session is a no-op.
+func (s *session) CloseIfTypeOpen(ctx context.Context) error {
+	s.mu.Lock()
+	open := s.open
+	mode := s.mode
+	s.mu.Unlock()
+	if !open || mode != modeType {
+		return nil
+	}
+	return s.close(ctx, "mute")
+}
+
 // Snapshot returns the current mode/open pair for status replies.
 // Lock-protected so a concurrent Toggle doesn't race the Status read.
 func (s *session) Snapshot() (mode string, open bool) {

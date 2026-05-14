@@ -70,6 +70,9 @@ func main() {
 	vadMinSpeechMSFlag := flag.Duration("vad-min-speech-ms", 400*time.Millisecond, "minimum raw-energy speech duration per utterance (in 80ms frames); shorter blips are dropped before reaching ASR to suppress Whisper hallucinations like \"Thank you\" (0 disables)")
 	asrTranscribeTimeoutFlag := flag.Duration("asr-transcribe-timeout", 30*time.Second, "per-utterance Transcribe deadline; raise for slow CPUs / large models")
 	asrMaxConcurrentFlag := flag.Int("asr-max-concurrent", 2, "max concurrent in-flight Transcribe calls; utterances beyond this are dropped with a WARN")
+	stripDisfluenciesFlag := flag.String("strip-disfluencies", defaultDisfluencies, "comma-separated list of filler tokens to strip from every transcript (case-insensitive, word-boundary matched); empty string disables stripping. Trailing ellipsis runs (\"...\", \"…\") are always trimmed regardless.")
+	unmuteToDictateFlag := flag.Bool("unmute-to-dictate", false, "open type-mode automatically when the configured mic transitions from muted to unmuted, and close on the reverse. Detects mute via all-zero PCM frames; only works on mics whose touch-mute streams literal zeros (e.g. MXL AC-44). Requires --audio-monitor.")
+	unmuteDebounceFlag := flag.Duration("unmute-to-dictate-debounce", 1*time.Second, "minimum duration a mute-state change must persist before the watcher fires a transition. Lower for snappier response, raise if you see spurious toggles. Rounded to whole 80ms frames internally.")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -160,11 +163,18 @@ func main() {
 			logger.Error("asr.select", "err", err, "backend", *asrBackendFlag)
 			os.Exit(1)
 		}
+		disfluencyRE := compileDisfluencyRE(*stripDisfluenciesFlag)
+		if disfluencyRE != nil {
+			logger.Info("asr disfluency strip enabled", "tokens", *stripDisfluenciesFlag)
+		} else {
+			logger.Info("asr disfluency strip disabled (empty list)")
+		}
 		asrMon := newASRMonitor(logger, backend, asrMonitorConfig{
 			BackendName:       *asrBackendFlag,
 			HealthInterval:    10 * time.Second,
 			TranscribeTimeout: *asrTranscribeTimeoutFlag,
 			MaxConcurrent:     *asrMaxConcurrentFlag,
+			DisfluencyRE:      disfluencyRE,
 		})
 		asrMon.Start(ctx)
 		defer asrMon.Stop()
@@ -275,6 +285,20 @@ func main() {
 		audioMon.onUtterance = sess.OnUtterance
 		handler.session = sess
 		logger.Info("session orchestrator ready", "ydotool", *ydotoolBinaryFlag, "audio_cues", *audioCuesFlag)
+
+		// Unmute-to-dictate watcher. Requires audioMon to be running so
+		// it has a frame stream to consume; --audio-monitor is the
+		// existing gate for that. The watcher tracks transitions only —
+		// startup state seeds without firing, so the daemon doesn't open
+		// a session just because the mic happens to be unmuted at boot.
+		if *unmuteToDictateFlag {
+			debounceFrames := max(int(*unmuteDebounceFlag/audio.FrameDuration), 1)
+			watcher := newMuteWatcher(logger, sess, debounceFrames)
+			audioMon.onFrame = watcher.OnFrame
+			logger.Info("unmute-to-dictate enabled",
+				"debounce_frames", debounceFrames,
+				"debounce_ms", debounceFrames*int(audio.FrameMS))
+		}
 	} else if audioMon != nil {
 		// Audio without ASR: keep utterance counting alive, but no
 		// dispatch path is available.
