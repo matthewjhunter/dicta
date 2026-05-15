@@ -108,10 +108,12 @@ tasks:
 
   install:user:
     desc: |
-      Install dictad + dicta + dicta-preview into ~/.local/bin and the
-      systemd user unit into ~/.config/systemd/user. Run `task build:all`
-      first. Does NOT enable the unit — run `systemctl --user enable
-      --now dictad.service` separately.
+      Build, then install dictad + dicta + dicta-preview into ~/.local/bin
+      and the systemd user unit into ~/.config/systemd/user. Does NOT
+      enable the unit (run `systemctl --user enable --now dictad.service`
+      separately) and does NOT restart a running daemon (run `task
+      restart` for that).
+    deps: [build:all]
     cmds:
       - install -d ~/.local/bin
       - install -m 0755 {{.BIN}}/dictad ~/.local/bin/dictad
@@ -120,6 +122,12 @@ tasks:
       - install -d ~/.config/systemd/user
       - install -m 0644 packaging/systemd/dictad.service ~/.config/systemd/user/dictad.service
       - systemctl --user daemon-reload
+
+  restart:
+    desc: Restart the running dictad user service so it picks up a newly installed binary.
+    cmds:
+      - systemctl --user restart dictad.service
+      - systemctl --user --no-pager status dictad.service
 
   install:keybindings:
     desc: |
