@@ -1,188 +1,245 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/matthewjhunter/dicta/internal/mute"
 )
 
-// fakeToggler records EnsureTypeOpen / CloseIfTypeOpen calls so a test
-// can assert how many transitions the watcher actually fired and in
-// what order. Each call increments the corresponding counter; the
-// sequence slice captures the order ("open" or "close").
+// fakeToggler records EnsureTypeOpen / CloseIfTypeOpen calls so a
+// test can assert how many transitions the watcher actually fired
+// and in what order.
 type fakeToggler struct {
-	opens    atomic.Uint64
-	closes   atomic.Uint64
+	opens  atomic.Uint64
+	closes atomic.Uint64
+
+	mu       sync.Mutex
 	sequence []string
 }
 
 func (f *fakeToggler) EnsureTypeOpen(_ context.Context) error {
 	f.opens.Add(1)
+	f.mu.Lock()
 	f.sequence = append(f.sequence, "open")
+	f.mu.Unlock()
 	return nil
 }
 
 func (f *fakeToggler) CloseIfTypeOpen(_ context.Context) error {
 	f.closes.Add(1)
+	f.mu.Lock()
 	f.sequence = append(f.sequence, "close")
+	f.mu.Unlock()
 	return nil
+}
+
+func (f *fakeToggler) snapshot() (uint64, uint64, []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	seq := make([]string, len(f.sequence))
+	copy(seq, f.sequence)
+	return f.opens.Load(), f.closes.Load(), seq
 }
 
 func discardWatcherLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func zeroFrame(n int) []byte    { return make([]byte, n) }
-func nonzeroFrame(n int) []byte { f := make([]byte, n); f[0] = 1; return f }
+// testDebounce keeps unit tests fast. settleSlack is added after a
+// transition is pushed so the timer has a comfortable window to fire.
+const (
+	testDebounce = 20 * time.Millisecond
+	settleSlack  = 80 * time.Millisecond
+)
 
-func TestIsAllZero(t *testing.T) {
-	cases := []struct {
-		in   []byte
-		want bool
-	}{
-		{[]byte{}, true},
-		{[]byte{0}, true},
-		{[]byte{0, 0, 0, 0}, true},
-		{[]byte{0, 0, 1, 0}, false},
-		{[]byte{1, 0, 0, 0}, false},
-		{[]byte{0, 0, 0, 0xff}, false},
-		{bytes.Repeat([]byte{0}, 2560), true},             // full FrameBytes of zeros
-		{append(bytes.Repeat([]byte{0}, 2559), 1), false}, // last byte nonzero
-	}
-	for _, tc := range cases {
-		if got := isAllZero(tc.in); got != tc.want {
-			t.Errorf("isAllZero(%v...) = %v, want %v", tc.in[:min(len(tc.in), 8)], got, tc.want)
+// startWatcher boots a muteWatcher under test and returns hooks for
+// sending events and shutting down. The watcher runs on a goroutine
+// until stop() is called.
+func startWatcher(t *testing.T, debounce time.Duration) (*fakeToggler, chan<- mute.Event, func()) {
+	t.Helper()
+	tog := &fakeToggler{}
+	w := newMuteWatcher(discardWatcherLogger(), tog, debounce)
+	ch := make(chan mute.Event, 32)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		w.Run(ctx, ch)
+		close(done)
+	}()
+	stop := func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("watcher.Run did not return within 2s")
 		}
 	}
+	return tog, ch, stop
 }
 
-func TestMuteWatcher_NoFireBeforeFirstFrameSeedsState(t *testing.T) {
-	// A single frame after construction seeds the baseline; no
-	// transition should fire even though the watcher's zero-value
-	// lastMuted (false) differs from a muted first frame.
-	tog := &fakeToggler{}
-	w := newMuteWatcher(discardWatcherLogger(), tog, 1)
-	w.OnFrame(zeroFrame(2560))
-	if tog.opens.Load() != 0 || tog.closes.Load() != 0 {
-		t.Errorf("first frame must not fire; got opens=%d closes=%d", tog.opens.Load(), tog.closes.Load())
+func settle(debounce time.Duration) {
+	time.Sleep(debounce + settleSlack)
+}
+
+func initial(s mute.State) mute.Event {
+	return mute.Event{State: s, Source: "test", Initial: true}
+}
+
+func transition(s mute.State) mute.Event {
+	return mute.Event{State: s, Source: "test"}
+}
+
+func TestMuteWatcher_NoFireOnInitialEvent(t *testing.T) {
+	tog, ch, stop := startWatcher(t, testDebounce)
+	defer stop()
+	ch <- initial(mute.Muted)
+	settle(testDebounce)
+
+	o, c, _ := tog.snapshot()
+	if o != 0 || c != 0 {
+		t.Errorf("Initial event should not fire; got opens=%d closes=%d", o, c)
 	}
 }
 
 func TestMuteWatcher_DebounceSuppressesShortGlitch(t *testing.T) {
-	// Start muted. Single nonzero frame, then back to muted.
-	// debounce=3 means a single-frame glitch is suppressed.
-	tog := &fakeToggler{}
-	w := newMuteWatcher(discardWatcherLogger(), tog, 3)
-	w.OnFrame(zeroFrame(2560))    // seed: muted
-	w.OnFrame(nonzeroFrame(2560)) // glitch
-	w.OnFrame(zeroFrame(2560))    // back to muted
-	w.OnFrame(zeroFrame(2560))
-	if tog.opens.Load() != 0 {
-		t.Errorf("debounced glitch should not have opened; got %d opens", tog.opens.Load())
+	// Seed muted, transient unmute glitch followed immediately by
+	// remute. Reversal must arrive within debounce window and cancel
+	// the pending fire.
+	tog, ch, stop := startWatcher(t, testDebounce)
+	defer stop()
+
+	ch <- initial(mute.Muted)
+	ch <- transition(mute.Unmuted)
+	// Reversal sent immediately (within debounce):
+	ch <- transition(mute.Muted)
+	settle(testDebounce)
+
+	o, c, _ := tog.snapshot()
+	if o != 0 || c != 0 {
+		t.Errorf("debounced glitch should not fire; got opens=%d closes=%d", o, c)
 	}
 }
 
-func TestMuteWatcher_FiresAfterDebounceFramesUnmute(t *testing.T) {
-	// Start muted. After debounce-many consecutive nonzero frames,
-	// EnsureTypeOpen fires exactly once.
-	tog := &fakeToggler{}
-	debounce := 3
-	w := newMuteWatcher(discardWatcherLogger(), tog, debounce)
-	w.OnFrame(zeroFrame(2560)) // seed: muted
+func TestMuteWatcher_FiresAfterDebounceHoldsUnmute(t *testing.T) {
+	// Seed muted, then a single unmute transition. Wait the debounce
+	// window and observe one EnsureTypeOpen fire.
+	tog, ch, stop := startWatcher(t, testDebounce)
+	defer stop()
 
-	// Frames 1..debounce-1: counter increments but no fire.
-	for i := 0; i < debounce-1; i++ {
-		w.OnFrame(nonzeroFrame(2560))
-		if tog.opens.Load() != 0 {
-			t.Fatalf("fired too early (after %d non-zero frames, debounce=%d)", i+1, debounce)
-		}
+	ch <- initial(mute.Muted)
+	ch <- transition(mute.Unmuted)
+	settle(testDebounce)
+
+	o, _, _ := tog.snapshot()
+	if o != 1 {
+		t.Errorf("expected 1 open after stable unmute; got opens=%d", o)
 	}
-	// Frame N: should fire.
-	w.OnFrame(nonzeroFrame(2560))
-	if tog.opens.Load() != 1 {
-		t.Fatalf("expected 1 open after %d non-zero frames, got %d", debounce, tog.opens.Load())
-	}
-	// Further nonzero frames: no additional fires (no transition).
+}
+
+func TestMuteWatcher_NoRefireOnRedundantEvents(t *testing.T) {
+	// After a transition fires, redundant events (same state as the
+	// new lastState) must not refire.
+	tog, ch, stop := startWatcher(t, testDebounce)
+	defer stop()
+
+	ch <- initial(mute.Muted)
+	ch <- transition(mute.Unmuted)
+	settle(testDebounce)
+	// Send extra redundant Unmuted "transitions" (defensive: a
+	// misbehaving source might re-emit; the watcher must not fire).
 	for range 5 {
-		w.OnFrame(nonzeroFrame(2560))
+		ch <- transition(mute.Unmuted)
 	}
-	if tog.opens.Load() != 1 {
-		t.Errorf("steady state should not refire; got %d opens", tog.opens.Load())
+	settle(testDebounce)
+
+	o, _, _ := tog.snapshot()
+	if o != 1 {
+		t.Errorf("redundant events should not refire; got opens=%d", o)
 	}
 }
 
 func TestMuteWatcher_FullCycle(t *testing.T) {
-	// Seed muted, run an unmute-mute-unmute cycle. Verify the
-	// open/close sequence matches expectations.
-	tog := &fakeToggler{}
-	w := newMuteWatcher(discardWatcherLogger(), tog, 2)
+	// Seed muted; cycle unmute, mute, unmute. Each transition is
+	// followed by a settle so the timer can fire before the next.
+	tog, ch, stop := startWatcher(t, testDebounce)
+	defer stop()
 
-	w.OnFrame(zeroFrame(2560)) // seed: muted
+	ch <- initial(mute.Muted)
+	ch <- transition(mute.Unmuted)
+	settle(testDebounce)
+	ch <- transition(mute.Muted)
+	settle(testDebounce)
+	ch <- transition(mute.Unmuted)
+	settle(testDebounce)
 
-	// Unmute (2 frames to fire).
-	w.OnFrame(nonzeroFrame(2560))
-	w.OnFrame(nonzeroFrame(2560))
-	if tog.opens.Load() != 1 {
-		t.Fatalf("after unmute: opens=%d want 1", tog.opens.Load())
+	o, c, seq := tog.snapshot()
+	if o != 2 || c != 1 {
+		t.Errorf("opens=%d closes=%d; want opens=2 closes=1", o, c)
 	}
-
-	// Mute (2 frames to fire).
-	w.OnFrame(zeroFrame(2560))
-	w.OnFrame(zeroFrame(2560))
-	if tog.closes.Load() != 1 {
-		t.Fatalf("after mute: closes=%d want 1", tog.closes.Load())
-	}
-
-	// Unmute again.
-	w.OnFrame(nonzeroFrame(2560))
-	w.OnFrame(nonzeroFrame(2560))
-	if tog.opens.Load() != 2 {
-		t.Fatalf("after second unmute: opens=%d want 2", tog.opens.Load())
-	}
-
 	want := []string{"open", "close", "open"}
-	if len(tog.sequence) != len(want) {
-		t.Fatalf("sequence length: got %d want %d (%v)", len(tog.sequence), len(want), tog.sequence)
+	if len(seq) != len(want) {
+		t.Fatalf("sequence length: got %d want %d (%v)", len(seq), len(want), seq)
 	}
 	for i, s := range want {
-		if tog.sequence[i] != s {
-			t.Errorf("sequence[%d] = %q want %q", i, tog.sequence[i], s)
+		if seq[i] != s {
+			t.Errorf("sequence[%d] = %q want %q", i, seq[i], s)
 		}
 	}
 }
 
-func TestMuteWatcher_CounterResetsOnReverseBeforeFire(t *testing.T) {
-	// Start muted, get partway through debounce on unmute, then go
-	// back to muted. The counter should reset; a subsequent full
-	// debounce-worth of unmute frames should still fire correctly.
-	tog := &fakeToggler{}
-	debounce := 4
-	w := newMuteWatcher(discardWatcherLogger(), tog, debounce)
+func TestMuteWatcher_ReverseBeforeFireThenForward(t *testing.T) {
+	// Pending unmute gets reversed back to muted, then a fresh unmute
+	// arrives and is allowed to settle. Exactly one open fires.
+	tog, ch, stop := startWatcher(t, testDebounce)
+	defer stop()
 
-	w.OnFrame(zeroFrame(2560)) // seed
-	// 2 nonzero (< debounce), then 1 zero (resets), then 4 nonzero -> fires.
-	w.OnFrame(nonzeroFrame(2560))
-	w.OnFrame(nonzeroFrame(2560))
-	w.OnFrame(zeroFrame(2560))
-	w.OnFrame(nonzeroFrame(2560))
-	w.OnFrame(nonzeroFrame(2560))
-	w.OnFrame(nonzeroFrame(2560))
-	w.OnFrame(nonzeroFrame(2560))
-	if tog.opens.Load() != 1 {
-		t.Fatalf("expected exactly 1 open; got %d", tog.opens.Load())
+	ch <- initial(mute.Muted)
+	ch <- transition(mute.Unmuted) // start pending
+	ch <- transition(mute.Muted)   // reverse before window closes
+	// Wait less than debounce so we don't accidentally fire anything.
+	time.Sleep(testDebounce / 4)
+	ch <- transition(mute.Unmuted) // start a fresh pending
+	settle(testDebounce)
+
+	o, c, _ := tog.snapshot()
+	if o != 1 || c != 0 {
+		t.Errorf("opens=%d closes=%d; want opens=1 closes=0", o, c)
 	}
 }
 
-func TestMuteWatcher_DebounceMinClamp(t *testing.T) {
-	// debounce < 1 should clamp to 1, not panic or never-fire.
-	tog := &fakeToggler{}
-	w := newMuteWatcher(discardWatcherLogger(), tog, 0)
-	w.OnFrame(zeroFrame(2560))    // seed
-	w.OnFrame(nonzeroFrame(2560)) // first nonzero frame fires immediately
-	if tog.opens.Load() != 1 {
-		t.Fatalf("debounce=0 should clamp to 1 and fire on first transition; got opens=%d", tog.opens.Load())
+func TestMuteWatcher_MinimalDebounceStillFires(t *testing.T) {
+	// 0 debounce should clamp to a minimum (1ms) inside the watcher,
+	// not panic or never fire.
+	tog, ch, stop := startWatcher(t, 0)
+	defer stop()
+
+	ch <- initial(mute.Muted)
+	ch <- transition(mute.Unmuted)
+	settle(50 * time.Millisecond)
+
+	o, _, _ := tog.snapshot()
+	if o != 1 {
+		t.Errorf("zero-debounce should clamp to a small value and fire; got opens=%d", o)
+	}
+}
+
+func TestMuteWatcher_HandlesUnseededTransitionDefensively(t *testing.T) {
+	// A source that skips its Initial event sends a transition first.
+	// The watcher must treat it as a seed and not fire.
+	tog, ch, stop := startWatcher(t, testDebounce)
+	defer stop()
+
+	ch <- transition(mute.Unmuted)
+	settle(testDebounce)
+
+	o, c, _ := tog.snapshot()
+	if o != 0 || c != 0 {
+		t.Errorf("unseeded transition should be treated as seed; got opens=%d closes=%d", o, c)
 	}
 }

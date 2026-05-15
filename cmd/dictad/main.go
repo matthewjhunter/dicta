@@ -71,8 +71,9 @@ func main() {
 	asrTranscribeTimeoutFlag := flag.Duration("asr-transcribe-timeout", 30*time.Second, "per-utterance Transcribe deadline; raise for slow CPUs / large models")
 	asrMaxConcurrentFlag := flag.Int("asr-max-concurrent", 2, "max concurrent in-flight Transcribe calls; utterances beyond this are dropped with a WARN")
 	stripDisfluenciesFlag := flag.String("strip-disfluencies", defaultDisfluencies, "comma-separated list of filler tokens to strip from every transcript (case-insensitive, word-boundary matched); empty string disables stripping. Trailing ellipsis runs (\"...\", \"…\") are always trimmed regardless.")
-	unmuteToDictateFlag := flag.Bool("unmute-to-dictate", false, "open type-mode automatically when the configured mic transitions from muted to unmuted, and close on the reverse. Detects mute via all-zero PCM frames; only works on mics whose touch-mute streams literal zeros (e.g. MXL AC-44). Requires --audio-monitor.")
-	unmuteDebounceFlag := flag.Duration("unmute-to-dictate-debounce", 1*time.Second, "minimum duration a mute-state change must persist before the watcher fires a transition. Lower for snappier response, raise if you see spurious toggles. Rounded to whole 80ms frames internally.")
+	unmuteToDictateFlag := flag.Bool("unmute-to-dictate", false, "DEFAULT-OFF. Open type-mode automatically when the configured mic transitions from muted to unmuted, and close on the reverse. Always-listening + auto-activation is opt-in; see mute-source-design.md §3.")
+	unmuteSourceFlag := flag.String("unmute-source", "auto", "Mute-detection backend when --unmute-to-dictate is on: `auto` (default — race pcm-zero+pipewire, first to fire wins), `pcm-zero` (all-zero PCM frames; works on MXL AC-44; needs --audio-monitor), or `pipewire` (wpctl poll on the mic's mute property; works on mics that expose mute via the UAC mute control unit).")
+	unmuteDebounceFlag := flag.Duration("unmute-to-dictate-debounce", 1*time.Second, "minimum duration a mute-state change must persist before the watcher fires a transition. Lower for snappier response, raise if you see spurious toggles.")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -286,18 +287,30 @@ func main() {
 		handler.session = sess
 		logger.Info("session orchestrator ready", "ydotool", *ydotoolBinaryFlag, "audio_cues", *audioCuesFlag)
 
-		// Unmute-to-dictate watcher. Requires audioMon to be running so
-		// it has a frame stream to consume; --audio-monitor is the
-		// existing gate for that. The watcher tracks transitions only —
-		// startup state seeds without firing, so the daemon doesn't open
-		// a session just because the mic happens to be unmuted at boot.
+		// Unmute-to-dictate watcher. The feature itself is default-off
+		// (security posture, mute-source-design.md §3). When enabled,
+		// build the configured mute.Source, wire it to the watcher's
+		// event loop, and run that loop on a daemon goroutine. The
+		// Initial event seeds state without firing; the user has to
+		// actually toggle mute for the watcher to act.
 		if *unmuteToDictateFlag {
-			debounceFrames := max(int(*unmuteDebounceFlag/audio.FrameDuration), 1)
-			watcher := newMuteWatcher(logger, sess, debounceFrames)
-			audioMon.onFrame = watcher.OnFrame
+			debounce := max(*unmuteDebounceFlag, time.Millisecond)
+			src, err := buildMuteSource(*unmuteSourceFlag, logger, audioMon, *audioDeviceFlag)
+			if err != nil {
+				logger.Error("unmute-to-dictate: build source", "err", err, "source", *unmuteSourceFlag)
+				os.Exit(1)
+			}
+			ch, err := src.Watch(ctx)
+			if err != nil {
+				logger.Error("unmute-to-dictate: source Watch", "err", err, "source", src.Name())
+				os.Exit(1)
+			}
+			watcher := newMuteWatcher(logger, sess, debounce)
+			go watcher.Run(ctx, ch)
 			logger.Info("unmute-to-dictate enabled",
-				"debounce_frames", debounceFrames,
-				"debounce_ms", debounceFrames*int(audio.FrameMS))
+				"source", src.Name(),
+				"describe", src.Describe(),
+				"debounce", debounce)
 		}
 	} else if audioMon != nil {
 		// Audio without ASR: keep utterance counting alive, but no

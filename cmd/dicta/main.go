@@ -8,6 +8,12 @@
 //	dicta commit --text "..."
 //	dicta cancel
 //	dicta shutdown
+//	dicta probe-mute [--device <name>] [--seconds <n>]
+//
+// probe-mute is a local diagnostic — it does not talk to the daemon.
+// It runs the mute.Source implementations side by side for a fixed
+// window and reports what each saw. Used to choose --unmute-source
+// or to diagnose unexpected behavior.
 //
 // Per-subcommand flags are parsed via flag.NewFlagSet so each subcommand
 // gets its own --help. The global --socket / --timeout flags must come
@@ -44,6 +50,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		fmt.Fprintf(stderr, "  commit --text \"...\"          commit clip-mode buffer to clipboard\n")
 		fmt.Fprintf(stderr, "  cancel                       cancel an open clip-mode session\n")
 		fmt.Fprintf(stderr, "  shutdown                     ask the daemon to exit cleanly\n")
+		fmt.Fprintf(stderr, "  probe-mute [opts]            diagnostic: probe which mute.Source works for your mic\n")
 		fmt.Fprintf(stderr, "\nflags:\n")
 		fs.PrintDefaults()
 	}
@@ -78,6 +85,8 @@ func run(args []string, stdout, stderr *os.File) int {
 		return runCancel(socketPath, *timeoutFlag, stdout, stderr)
 	case "shutdown":
 		return runShutdown(socketPath, *timeoutFlag, stdout, stderr)
+	case "probe-mute":
+		return runProbeMute(rest[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "dicta: unknown command: %s\n", rest[0])
 		fs.Usage()

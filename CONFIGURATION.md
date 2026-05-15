@@ -80,34 +80,41 @@ at your own risk.
 ## Unmute-to-dictate (optional)
 
 A second activation path alongside the Pause keystroke: the daemon
-watches the audio stream for the mic transitioning between muted and
-unmuted, and opens type-mode on unmute / closes it on mute.
+watches the configured mic for transitions between muted and unmuted,
+and opens type-mode on unmute / closes it on mute.
 
-**Hardware compatibility caveat.** The detector relies on the mic
-emitting **literal zero PCM samples** while muted — every byte of every
-captured frame must be 0x00, not "very quiet noise" or "attenuated
-audio". Only this perfect-zero behavior gives the unambiguous gap
-between muted and unmuted that lets the watcher avoid threshold tuning
-and false positives.
+**Default-off, by design.** Continuous mic-state watching plus
+automatic keystroke synthesis is not a posture to put a new user in
+without an explicit opt-in. The feature stays off unless you pass
+`--unmute-to-dictate`. See `mute-source-design.md` §3 for the locked
+security rationale.
 
-The feature has been developed and tuned against exactly one mic so
-far: the **MXL AC-44 TAP** (USB, touch-mute button on the unit, gates
-audio in device firmware). It is **untested on every other mic** and
-will silently misbehave on any mic whose mute leaves a noise floor
-above zero — the watcher will see "unmuted" indefinitely and the
-feature won't fire. If you're on something other than the AC-44,
-verify with a quick probe before enabling: capture a few seconds of
-"muted" audio (e.g. via `pw-record`) and confirm every sample is
-exactly zero. If you see any nonzero values, leave this feature off.
+**Pluggable detection.** The watcher consumes events from a
+`mute.Source`; the default `auto` mode runs every available source
+concurrently and locks in the first one that observes a real
+transition. Pin a specific source via `--unmute-source` if you want
+deterministic behavior. Sources currently shipped:
 
-A future iteration may add a configurable amplitude threshold so mics
-that mute by silencing-but-not-zeroing become detectable, but until
-that exists, this is a single-mic feature.
+- **`pcm-zero`** — infers mute from PCM frames. Works on mics that
+  emit literal zero samples while muted (verified on the **MXL AC-44
+  TAP**, which gates audio in firmware). Requires `--audio-monitor`.
+  Will read "unmuted" indefinitely on any mic whose mute leaves a
+  noise floor above zero, so it silently no-ops on those.
+- **`pipewire`** — polls `wpctl get-volume` for the `[MUTED]` tag on
+  the configured mic. Works on any mic whose hardware mute button
+  flips the UAC mute control unit visible to PipeWire. Does *not*
+  work on the AC-44 (confirmed: its firmware-gated mute is invisible
+  to PipeWire).
+
+If you're not sure which source works for your mic, run
+`dicta probe-mute --device <substring>` — it runs each source side
+by side for 15 seconds and reports what fired.
 
 | Flag | Default | What it does |
 |------|---------|--------------|
-| `--unmute-to-dictate` | `false` | Enable the watcher. Requires `--audio-monitor` (the watcher consumes the same frame stream). When the configured mic transitions muted→unmuted, the daemon opens type-mode as if you'd pressed Pause; on unmuted→muted it closes a type-mode session. Clip-mode sessions are never disturbed by the watcher — an explicit Scroll Lock gesture always wins. |
-| `--unmute-to-dictate-debounce` | `1s` | Minimum duration a transition must persist before firing. Suppresses single-frame glitches. Rounded down to whole 80 ms frames; values < 80 ms clamp to one frame. |
+| `--unmute-to-dictate` | `false` | Enable the watcher. The Pause key remains active in parallel — both activation paths route to the same session state machine. When the configured mic transitions muted→unmuted, the daemon opens type-mode as if you'd pressed Pause; on unmuted→muted it closes a type-mode session. Clip-mode sessions are never disturbed by the watcher — an explicit Scroll Lock gesture always wins. |
+| `--unmute-source` | `auto` | Detection backend: `auto` (race pcm-zero+pipewire, first transition wins, then lock in), `pcm-zero` (force PCM zero detection; needs `--audio-monitor`), or `pipewire` (force wpctl polling). |
+| `--unmute-to-dictate-debounce` | `1s` | Minimum duration a transition must persist before firing. Suppresses single-source glitches. |
 
 The Pause key remains active in parallel — both activation paths route
 to the same session state machine, so you can still toggle manually.
