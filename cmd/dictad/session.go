@@ -66,6 +66,13 @@ type session struct {
 	cleaner cleanup.Cleaner   // optional; nil = passthrough for both modes
 	auditW  audit.Writer      // optional; nil = no audit
 
+	// flushAudio asks the audio capture/VAD layer to finalize and emit
+	// any in-flight utterance immediately. Called from close() before
+	// open is set to false so the flushed utterance still passes the
+	// OnUtterance open-gate and reaches the type queue. Optional —
+	// tests and clip-only deployments leave it nil.
+	flushAudio func()
+
 	// daemonCtx is the long-lived parent ctx for typer dispatch. We do
 	// NOT derive a per-session ctx here because cancelling a session
 	// while a transcript is mid-type would leave a partial phrase on
@@ -130,7 +137,7 @@ var ErrCommitOnlyValidInClipMode = fmt.Errorf("commit only valid while clip-mode
 // for the cancel command.
 var ErrCancelOnlyValidInClipMode = fmt.Errorf("cancel only valid while clip-mode session is open")
 
-func newSession(logger *slog.Logger, typer dispatch.Typer, clipper dispatch.Clipper, cuer audio.Cuer, asrMon *asrMonitor, vad audio.VAD, bus *eventBus, preview previewController, cleaner cleanup.Cleaner, auditW audit.Writer, daemonCtx context.Context) *session {
+func newSession(logger *slog.Logger, typer dispatch.Typer, clipper dispatch.Clipper, cuer audio.Cuer, asrMon *asrMonitor, vad audio.VAD, bus *eventBus, preview previewController, cleaner cleanup.Cleaner, auditW audit.Writer, flushAudio func(), daemonCtx context.Context) *session {
 	if cleaner == nil {
 		cleaner = cleanup.Passthrough()
 	}
@@ -138,17 +145,18 @@ func newSession(logger *slog.Logger, typer dispatch.Typer, clipper dispatch.Clip
 		auditW = audit.Passthrough()
 	}
 	s := &session{
-		logger:    logger,
-		typer:     typer,
-		clipper:   clipper,
-		cuer:      cuer,
-		asrMon:    asrMon,
-		vad:       vad,
-		bus:       bus,
-		preview:   preview,
-		cleaner:   cleaner,
-		auditW:    auditW,
-		daemonCtx: daemonCtx,
+		logger:     logger,
+		typer:      typer,
+		clipper:    clipper,
+		cuer:       cuer,
+		asrMon:     asrMon,
+		vad:        vad,
+		bus:        bus,
+		preview:    preview,
+		cleaner:    cleaner,
+		auditW:     auditW,
+		flushAudio: flushAudio,
+		daemonCtx:  daemonCtx,
 	}
 	if preview != nil {
 		// When the panel exits on its own (after sending commit/cancel,
@@ -379,9 +387,25 @@ func (s *session) close(ctx context.Context, reason string) error {
 		return nil
 	}
 	prevMode := s.mode
+	epoch := s.epoch
+	s.mu.Unlock()
+
+	// Flush any in-flight VAD utterance BEFORE flipping open=false, so
+	// the flushed OnUtterance call sees open=true and enqueues. Without
+	// this, a user who taps mute right after speaking has their last
+	// utterance dropped: mute-debounce (~250 ms) closes the session
+	// well before the VAD hangover (default 800 ms) finalizes, and
+	// OnUtterance's !open gate then silently discards the buffered
+	// audio. flushAudio is synchronous: it blocks until the audio
+	// loop has emitted (and the resulting OnUtterance callback has
+	// returned, which is what enqueues the job).
+	if s.flushAudio != nil {
+		s.flushAudio()
+	}
+
+	s.mu.Lock()
 	s.mode = modeNone
 	s.open = false
-	epoch := s.epoch
 	s.mu.Unlock()
 
 	if prevMode == modeClip && s.preview != nil {

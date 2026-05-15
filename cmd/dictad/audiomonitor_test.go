@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -262,6 +263,155 @@ func TestAudioMonitor_MinSpeechFramesGate_DropsBlip(t *testing.T) {
 	if len(emissions[0]) < minBytes {
 		t.Errorf("surviving emission length %d < expected real-speech min %d",
 			len(emissions[0]), minBytes)
+	}
+}
+
+// TestAudioMonitor_FlushEmitsInFlightUtterance is the regression test
+// for the "tapped mute too fast and lost my last sentence" bug. With
+// a long VAD hangover, a user who mutes immediately after speaking
+// would normally have their in-flight accumulator stranded — the
+// hangover never fires, so the natural end-of-utterance path doesn't
+// emit, and session.close's !open gate then drops anything that
+// would arrive later. Flush() bypasses the hangover.
+func TestAudioMonitor_FlushEmitsInFlightUtterance(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	fc := newFakeCapture()
+	mon := &audioMonitor{
+		cap: fc,
+		vad: audio.NewEnergyVAD(audio.VADConfig{
+			Calibrate: 80 * time.Millisecond,
+			// Deliberately long: we must not wait for it.
+			Hangover: 30 * time.Second,
+		}),
+		rb:       audio.NewRingBuffer(audio.CapacityForSeconds(5)),
+		log:      logger,
+		flushReq: make(chan chan struct{}, 1),
+	}
+	mon.backend.Store("")
+
+	var (
+		emissions [][]byte
+		emitMu    sync.Mutex
+	)
+	mon.onUtterance = func(pcm []byte) {
+		emitMu.Lock()
+		defer emitMu.Unlock()
+		captured := make([]byte, len(pcm))
+		copy(captured, pcm)
+		emissions = append(emissions, captured)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := mon.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = mon.Stop() })
+
+	loud := loudFrame(0.6)
+	silent := make([]byte, audio.FrameBytes)
+
+	// Calibration window.
+	fc.send(silent)
+	fc.send(silent)
+	// In-utterance: enough loud frames to clear any min-speech gate.
+	for range 6 {
+		fc.send(loud)
+	}
+
+	// Wait until the loop has actually consumed the frames so the
+	// accumulator is populated before we flush. A polling assertion
+	// on SpeechFrames is simpler than a barrier.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if mon.Snapshot().SpeechFrames >= 6 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// No natural emission yet — hangover is 30 s.
+	emitMu.Lock()
+	if n := len(emissions); n != 0 {
+		emitMu.Unlock()
+		t.Fatalf("pre-flush: expected 0 emissions, got %d", n)
+	}
+	emitMu.Unlock()
+
+	mon.Flush()
+
+	emitMu.Lock()
+	defer emitMu.Unlock()
+	if len(emissions) != 1 {
+		t.Fatalf("post-flush: expected exactly 1 emission, got %d", len(emissions))
+	}
+	if got := len(emissions[0]); got < 5*audio.FrameBytes {
+		t.Errorf("flushed emission size %d < expected ≥%d", got, 5*audio.FrameBytes)
+	}
+}
+
+// TestAudioMonitor_FlushWithoutUtteranceIsNoop verifies that Flush
+// during silence (no accumulator content) does not produce a phantom
+// emission — session.close calls Flush unconditionally, so the case
+// where no speech is in flight must be a clean no-op.
+func TestAudioMonitor_FlushWithoutUtteranceIsNoop(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	fc := newFakeCapture()
+	mon := &audioMonitor{
+		cap:      fc,
+		vad:      audio.NewEnergyVAD(audio.VADConfig{Calibrate: 80 * time.Millisecond}),
+		rb:       audio.NewRingBuffer(audio.CapacityForSeconds(5)),
+		log:      logger,
+		flushReq: make(chan chan struct{}, 1),
+	}
+	mon.backend.Store("")
+
+	var called atomic.Bool
+	mon.onUtterance = func(pcm []byte) { called.Store(true) }
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := mon.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = mon.Stop() })
+
+	silent := make([]byte, audio.FrameBytes)
+	for range 4 {
+		fc.send(silent)
+	}
+	// Let frames drain.
+	for deadline := time.Now().Add(500 * time.Millisecond); time.Now().Before(deadline); {
+		if mon.Snapshot().Frames >= 4 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mon.Flush()
+
+	if called.Load() {
+		t.Error("Flush produced an emission when accumulator was empty")
+	}
+}
+
+// TestAudioMonitor_FlushBeforeStartIsNoop covers the close-before-
+// start corner: Flush must not block or panic if the audio loop
+// hasn't started, since session.close still runs the flush call
+// unconditionally.
+func TestAudioMonitor_FlushBeforeStartIsNoop(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mon := newAudioMonitor(logger, audio.CaptureConfig{}, audio.VADConfig{})
+	// Should return promptly, not block on the unmanned flushReq chan.
+	done := make(chan struct{})
+	go func() {
+		mon.Flush()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Flush on unstarted monitor blocked")
 	}
 }
 

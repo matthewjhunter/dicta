@@ -233,7 +233,7 @@ func newTestSession(t *testing.T) (*session, *fakeTyper, *fakeCuer, *resettableV
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
-	s := newSession(discardLogger(), typer, nil, cuer, asrMon, vad, nil, nil, nil, nil, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, vad, nil, nil, nil, nil, nil, t.Context())
 	return s, typer, cuer, vad, asrFake
 }
 
@@ -352,6 +352,53 @@ func TestSession_QueuedTranscriptDrainsAfterClose(t *testing.T) {
 	}
 }
 
+// TestSession_CloseFlushesInFlightUtterance simulates the audio-fast-
+// mute bug: VAD hasn't finalized when the user taps mute. close()'s
+// flushAudio hook must run OnUtterance while open=true so the still-
+// buffered audio reaches the type queue. Without the flush hook the
+// utterance is dropped (covered by TestSession_OnUtteranceDropsWhenClosed).
+func TestSession_CloseFlushesInFlightUtterance(t *testing.T) {
+	typer := &fakeTyper{}
+	cuer := &fakeCuer{}
+	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "last words"}}
+	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
+		BackendName:       "fake",
+		HealthInterval:    time.Hour,
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     2,
+	})
+
+	// We need to refer to s from inside flushAudio (a closure capture);
+	// declare first and assign after construction.
+	var s *session
+	flush := func() {
+		// Simulate the audio loop's flush behavior: synchronously
+		// invoke OnUtterance with a buffered PCM payload. This is what
+		// the real audioMonitor.Flush does via its onUtterance callback.
+		s.OnUtterance(make([]byte, 1280))
+	}
+	s = newSession(discardLogger(), typer, nil, cuer, asrMon,
+		&resettableVAD{}, nil, nil, nil, nil, flush, t.Context())
+
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatal(err)
+	}
+	// User taps mute right after speaking — VAD never fires OnUtterance
+	// naturally. Close triggers the flush, which enqueues the in-flight
+	// utterance before open is set to false.
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for the transcribe + type worker to drain.
+	time.Sleep(200 * time.Millisecond)
+
+	calls := typer.Calls()
+	if len(calls) != 1 || calls[0] != "last words" {
+		t.Errorf("expected Type calls=[last words] (flushed and drained); got %v", calls)
+	}
+}
+
 func TestSession_ReopenAcrossInflightDoesNotType(t *testing.T) {
 	// User toggles off then immediately on again. The in-flight transcript
 	// from the first session must not type into the second session.
@@ -412,7 +459,7 @@ func TestSession_PublishesSessionStateOnOpenAndClose(t *testing.T) {
 	r := &recordingPush{}
 	bus.Subscribe([]string{"session_state"}, r.Push)
 
-	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, bus, nil, nil, nil, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, bus, nil, nil, nil, nil, t.Context())
 
 	if err := s.Toggle(t.Context(), "type"); err != nil {
 		t.Fatal(err)
@@ -469,7 +516,7 @@ func newClipSession(t *testing.T) (*session, *fakeClipper, *fakePreview, *fakeCu
 		BackendName:    "fake",
 		HealthInterval: time.Hour,
 	})
-	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, nil, preview, nil, nil, t.Context())
+	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, nil, preview, nil, nil, nil, t.Context())
 	return s, clipper, preview, cuer
 }
 
@@ -637,7 +684,7 @@ func TestSession_TypeModePublishesRawTranscript(t *testing.T) {
 	bus.Subscribe([]string{"transcript"}, r.Push)
 	cleaner := &fakeCleaner{result: "CLEANED-NEVER-USED"}
 
-	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, bus, nil, cleaner, nil, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, bus, nil, cleaner, nil, nil, t.Context())
 	if err := s.Toggle(t.Context(), "type"); err != nil {
 		t.Fatal(err)
 	}
@@ -697,7 +744,7 @@ func TestSession_ClipModePublishesCleanedTranscript(t *testing.T) {
 	bus.Subscribe([]string{"transcript"}, r.Push)
 	cleaner := &fakeCleaner{result: "I ate apples; they're delicious."}
 
-	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, bus, preview, cleaner, nil, t.Context())
+	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, bus, preview, cleaner, nil, nil, t.Context())
 	if err := s.Toggle(t.Context(), "clip"); err != nil {
 		t.Fatal(err)
 	}
@@ -757,7 +804,7 @@ func TestSession_ClipModeCleanupErrorFallsBackToRaw(t *testing.T) {
 	bus.Subscribe([]string{"transcript"}, r.Push)
 	cleaner := &fakeCleaner{err: errors.New("cleanup endpoint down")}
 
-	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, bus, preview, cleaner, nil, t.Context())
+	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, bus, preview, cleaner, nil, nil, t.Context())
 	if err := s.Toggle(t.Context(), "clip"); err != nil {
 		t.Fatal(err)
 	}
@@ -800,7 +847,7 @@ func TestSession_NilCleanerDefaultsToPassthrough(t *testing.T) {
 	r := &recordingPush{}
 	bus.Subscribe([]string{"transcript"}, r.Push)
 
-	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, bus, preview, nil, nil, t.Context())
+	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, bus, preview, nil, nil, nil, t.Context())
 	if err := s.Toggle(t.Context(), "clip"); err != nil {
 		t.Fatal(err)
 	}
@@ -890,7 +937,7 @@ func TestSession_TypeModeAuditRecord(t *testing.T) {
 	})
 	auditW := &fakeAudit{}
 
-	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, auditW, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, auditW, nil, t.Context())
 	if err := s.Toggle(t.Context(), "type"); err != nil {
 		t.Fatal(err)
 	}
@@ -959,7 +1006,7 @@ func TestSession_ClipModeAuditRecord(t *testing.T) {
 	cleaner := &fakeCleaner{result: "I ate apples; they're delicious."}
 	auditW := &fakeAudit{}
 
-	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, nil, preview, cleaner, auditW, t.Context())
+	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, nil, preview, cleaner, auditW, nil, t.Context())
 	if err := s.Toggle(t.Context(), "clip"); err != nil {
 		t.Fatal(err)
 	}
@@ -1011,7 +1058,7 @@ func TestSession_AuditInvokedForDrainedTranscript(t *testing.T) {
 	})
 	auditW := &fakeAudit{}
 
-	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, auditW, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, auditW, nil, t.Context())
 	if err := s.Toggle(t.Context(), "type"); err != nil {
 		t.Fatal(err)
 	}
@@ -1109,7 +1156,7 @@ func TestSession_TypeModeSerializesDispatch(t *testing.T) {
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
-	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, nil, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, nil, nil, t.Context())
 	if err := s.Toggle(t.Context(), "type"); err != nil {
 		t.Fatal(err)
 	}
@@ -1180,7 +1227,7 @@ func TestSession_TypeModeOrdering(t *testing.T) {
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
-	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, nil, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, nil, nil, t.Context())
 	if err := s.Toggle(t.Context(), "type"); err != nil {
 		t.Fatal(err)
 	}
@@ -1238,7 +1285,7 @@ func TestSession_TypeModeSkipDoesNotBlockNext(t *testing.T) {
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
-	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, nil, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, nil, nil, t.Context())
 	if err := s.Toggle(t.Context(), "type"); err != nil {
 		t.Fatal(err)
 	}
@@ -1275,7 +1322,7 @@ func TestSession_AuditFailureDoesNotBreakDispatch(t *testing.T) {
 	})
 	auditW := &fakeAudit{err: errors.New("disk full")}
 
-	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, auditW, t.Context())
+	s := newSession(discardLogger(), typer, nil, cuer, asrMon, &resettableVAD{}, nil, nil, nil, auditW, nil, t.Context())
 	if err := s.Toggle(t.Context(), "type"); err != nil {
 		t.Fatal(err)
 	}

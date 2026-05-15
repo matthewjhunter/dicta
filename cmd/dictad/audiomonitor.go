@@ -7,6 +7,7 @@ import (
 	"math"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/matthewjhunter/dicta/internal/audio"
 	"github.com/matthewjhunter/dicta/internal/control"
@@ -53,6 +54,17 @@ type audioMonitor struct {
 	// non-blocking — runs on the audio pump goroutine.
 	onFrame func(pcm []byte)
 
+	// flushReq lets external callers (specifically session.close) ask
+	// the audio loop to force-emit whatever it has accumulated so far,
+	// even if the VAD hasn't seen enough silence to declare end-of-
+	// utterance yet. Without this, a user who taps mute right after
+	// speaking has their last utterance dropped: the close fires after
+	// the mute debounce (~250 ms) but the VAD hangover (default 800 ms)
+	// hasn't expired, so OnUtterance never runs while open=true and the
+	// drained-but-buffered audio is discarded by session.OnUtterance's
+	// !open gate.
+	flushReq chan chan struct{}
+
 	// stats — atomic to keep the read in Snapshot() lock-free. EnergyVAD
 	// itself is documented as single-goroutine, so noiseFloor is mirrored
 	// out from inside loop() rather than read directly.
@@ -71,10 +83,11 @@ type audioMonitor struct {
 
 func newAudioMonitor(log *slog.Logger, cfg audio.CaptureConfig, vadCfg audio.VADConfig) *audioMonitor {
 	m := &audioMonitor{
-		cap: audio.NewSubprocessCapture(cfg),
-		vad: audio.NewEnergyVAD(vadCfg),
-		rb:  audio.NewRingBuffer(audio.CapacityForSeconds(30)),
-		log: log,
+		cap:      audio.NewSubprocessCapture(cfg),
+		vad:      audio.NewEnergyVAD(vadCfg),
+		rb:       audio.NewRingBuffer(audio.CapacityForSeconds(30)),
+		log:      log,
+		flushReq: make(chan chan struct{}, 1),
 	}
 	m.backend.Store("")
 	return m
@@ -150,67 +163,88 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 		rawSpeechCount int
 	)
 
-	for f := range frames {
-		m.rb.Push(f)
-		m.frames.Add(1)
-		if m.onFrame != nil {
-			m.onFrame(f.PCM)
+	// emit performs the end-of-utterance bookkeeping: applies the min-
+	// speech gate, hands a copy of the accumulator to onUtterance, and
+	// resets accumulator state. Pulled out so the natural !speech path
+	// and the explicit flush path share semantics — in particular both
+	// honor minRawSpeechFrames so a flushed blip can't bypass the
+	// hallucination filter.
+	emit := func(reason string) {
+		if m.onUtterance != nil && len(accumulator) > 0 {
+			if m.minRawSpeechFrames > 0 && rawSpeechCount < m.minRawSpeechFrames {
+				m.log.Info("audio.utterance dropped: below min-speech-frames",
+					"raw_speech_frames", rawSpeechCount,
+					"min", m.minRawSpeechFrames,
+					"audio_ms", utterance_ms(len(accumulator)),
+					"reason", reason)
+			} else {
+				utterance := make([]byte, len(accumulator))
+				copy(utterance, accumulator)
+				m.onUtterance(utterance)
+			}
 		}
-		speech := m.vad.IsSpeech(f)
-		m.lastSpeech.Store(speech)
-		if speech {
-			m.speechFrames.Add(1)
-			if !inUtterance {
-				inUtterance = true
-				accumulator = accumulator[:0]
-				rawSpeechCount = 0
+		accumulator = accumulator[:0]
+		rawSpeechCount = 0
+		inUtterance = false
+	}
+
+	for {
+		select {
+		case done := <-m.flushReq:
+			// Forced finalization (session.close path): flush whatever
+			// the accumulator holds without waiting for VAD hangover.
+			emit("flush")
+			close(done)
+		case f, ok := <-frames:
+			if !ok {
+				return
 			}
-			if energyVAD != nil && energyVAD.LastRawSpeech() {
-				rawSpeechCount++
+			m.rb.Push(f)
+			m.frames.Add(1)
+			if m.onFrame != nil {
+				m.onFrame(f.PCM)
 			}
-			if m.onUtterance != nil {
-				accumulator = append(accumulator, f.PCM...)
-				// Force-emit when the accumulator hits the cap so a
-				// stuck VAD (or a genuinely long speech burst) produces
-				// bounded chunks instead of one giant clip. Stay in
-				// utterance: subsequent frames keep accumulating into a
-				// fresh buffer. The min-speech gate is intentionally
-				// not consulted here — anything that ran long enough to
-				// hit the cap is unambiguously speech.
-				if m.maxUtteranceBytes > 0 && len(accumulator) >= m.maxUtteranceBytes {
-					utterance := make([]byte, len(accumulator))
-					copy(utterance, accumulator)
-					m.log.Warn("audio.utterance force-split: cap reached",
-						"max_bytes", m.maxUtteranceBytes,
-						"audio_ms", utterance_ms(len(utterance)))
-					m.onUtterance(utterance)
+			speech := m.vad.IsSpeech(f)
+			m.lastSpeech.Store(speech)
+			if speech {
+				m.speechFrames.Add(1)
+				if !inUtterance {
+					inUtterance = true
 					accumulator = accumulator[:0]
+					rawSpeechCount = 0
 				}
-			}
-		} else {
-			m.silenceFrames.Add(1)
-			if inUtterance {
-				inUtterance = false
-				if m.onUtterance != nil && len(accumulator) > 0 {
-					if m.minRawSpeechFrames > 0 && rawSpeechCount < m.minRawSpeechFrames {
-						m.log.Info("audio.utterance dropped: below min-speech-frames",
-							"raw_speech_frames", rawSpeechCount,
-							"min", m.minRawSpeechFrames,
-							"audio_ms", utterance_ms(len(accumulator)))
-					} else {
-						// Hand off a copy — the next utterance reuses the
-						// accumulator's backing array.
+				if energyVAD != nil && energyVAD.LastRawSpeech() {
+					rawSpeechCount++
+				}
+				if m.onUtterance != nil {
+					accumulator = append(accumulator, f.PCM...)
+					// Force-emit when the accumulator hits the cap so a
+					// stuck VAD (or a genuinely long speech burst)
+					// produces bounded chunks instead of one giant clip.
+					// Stay in utterance: subsequent frames keep
+					// accumulating into a fresh buffer. The min-speech
+					// gate is intentionally not consulted here —
+					// anything that ran long enough to hit the cap is
+					// unambiguously speech.
+					if m.maxUtteranceBytes > 0 && len(accumulator) >= m.maxUtteranceBytes {
 						utterance := make([]byte, len(accumulator))
 						copy(utterance, accumulator)
+						m.log.Warn("audio.utterance force-split: cap reached",
+							"max_bytes", m.maxUtteranceBytes,
+							"audio_ms", utterance_ms(len(utterance)))
 						m.onUtterance(utterance)
+						accumulator = accumulator[:0]
 					}
 				}
-				accumulator = accumulator[:0]
-				rawSpeechCount = 0
+			} else {
+				m.silenceFrames.Add(1)
+				if inUtterance {
+					emit("end-of-utterance")
+				}
 			}
-		}
-		if energyVAD != nil {
-			m.noiseFloor.Store(math.Float64bits(energyVAD.NoiseFloor()))
+			if energyVAD != nil {
+				m.noiseFloor.Store(math.Float64bits(energyVAD.NoiseFloor()))
+			}
 		}
 	}
 }
@@ -219,6 +253,37 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 // Reset() on session-open (§5.1: "calibrate over the first 500ms of
 // each opened session").
 func (m *audioMonitor) VAD() audio.VAD { return m.vad }
+
+// Flush asks the audio loop to immediately emit whatever in-flight
+// utterance the accumulator is holding. Used by session.close so a
+// user tapping mute right after speaking still gets their last
+// utterance typed: without this, the close fires after the mute
+// debounce (~250 ms) but the VAD hangover (default 800 ms) hasn't
+// expired, OnUtterance never runs while open=true, and the buffered
+// audio is dropped by session.OnUtterance's !open gate.
+//
+// Synchronous: returns after the audio loop has processed the flush
+// (and any synchronous onUtterance callback has returned). If the
+// loop has already exited or is otherwise unreachable, Flush returns
+// after a short timeout rather than blocking forever — close() must
+// not stall waiting for a stopped audio pump.
+func (m *audioMonitor) Flush() {
+	if !m.running.Load() {
+		return
+	}
+	done := make(chan struct{})
+	select {
+	case m.flushReq <- done:
+	case <-time.After(100 * time.Millisecond):
+		m.log.Warn("audio.flush: loop did not accept flush request")
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		m.log.Warn("audio.flush: loop did not complete flush within timeout")
+	}
+}
 
 // utterance_ms approximates the audio duration of a PCM byte buffer
 // using the locked D15 frame format (16 kHz mono int16 LE — 32 bytes

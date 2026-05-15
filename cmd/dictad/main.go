@@ -282,7 +282,7 @@ func main() {
 				"retention_days", *auditRetentionDaysFlag)
 		}
 
-		sess = newSession(logger, typer, clipper, cuer, handler.asr, audioMon.VAD(), bus, preview, cleaner, auditW, ctx)
+		sess = newSession(logger, typer, clipper, cuer, handler.asr, audioMon.VAD(), bus, preview, cleaner, auditW, audioMon.Flush, ctx)
 		audioMon.onUtterance = sess.OnUtterance
 		handler.session = sess
 		logger.Info("session orchestrator ready", "ydotool", *ydotoolBinaryFlag, "audio_cues", *audioCuesFlag)
