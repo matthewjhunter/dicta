@@ -212,15 +212,21 @@ func (s *session) typeWorker() {
 			if job.text == "" {
 				continue
 			}
-			// Re-check the session epoch: if the session has closed
-			// or reopened between submission and this dequeue, the
-			// transcript belongs to a session the user no longer
-			// considers active. Drop without typing.
+			// Re-check the session epoch: if the session has been
+			// re-opened (or the mode has switched) since the job was
+			// submitted, the transcript belongs to a session the user
+			// no longer considers active. Drop without typing.
+			//
+			// Note: we deliberately do NOT check `open` here. A close
+			// without a subsequent re-open leaves the epoch unchanged,
+			// so anything queued at close time drains. This matches
+			// the user-visible contract: "tapping mute / pressing
+			// Pause stops me from accepting more audio, but commits
+			// what I already said."
 			s.mu.Lock()
 			liveEpoch := s.epoch
-			liveOpen := s.open
 			s.mu.Unlock()
-			if !liveOpen || liveEpoch != job.epoch {
+			if liveEpoch != job.epoch {
 				continue
 			}
 			text := job.text
@@ -354,10 +360,14 @@ func (s *session) open_(ctx context.Context, mode sessionMode) error {
 	return nil
 }
 
-// close transitions the session to (none, open=false). Bumping the
-// epoch under the lock invalidates every still-pending utterance
-// handler captured by the previous session: when their transcripts
-// arrive they will compare epochs and drop instead of typing.
+// close transitions the session to (none, open=false). Closing does
+// NOT bump the epoch: queued transcripts whose ASR work was already
+// in flight when the user pressed Pause / tapped mute are allowed
+// to type to completion. The epoch is bumped on the NEXT open, which
+// is the canonical "you're stale, drop" boundary — anything from the
+// closed session that arrives after a re-open compares epochs and
+// drops. This means the worker can drain its queue after a close
+// without typing into a different session's context.
 //
 // On clip-mode close, the preview subprocess is killed via SIGTERM.
 // Kill is idempotent — if the panel already exited (after sending
@@ -369,7 +379,6 @@ func (s *session) close(ctx context.Context, reason string) error {
 		return nil
 	}
 	prevMode := s.mode
-	s.epoch++
 	s.mode = modeNone
 	s.open = false
 	epoch := s.epoch
@@ -522,11 +531,16 @@ func (s *session) OnUtterance(pcm []byte) {
 
 	s.asrMon.OnUtterance(pcm,
 		func(tr transcriptResult) {
+			// Drop if the session has been re-opened (epoch advanced)
+			// or switched to a different mode since submission. A
+			// close *without* a re-open leaves the epoch alone and
+			// lets the transcript drain to the worker — see the
+			// session.close comment for the drain contract.
 			s.mu.Lock()
 			current := s.epoch
-			stillOpen := s.open && s.mode == mode
+			currentMode := s.mode
 			s.mu.Unlock()
-			if !stillOpen || current != epoch {
+			if current != epoch || (currentMode != mode && currentMode != modeNone) {
 				s.logger.Info("session.transcript dropped: session changed",
 					"submit_epoch", epoch, "current_epoch", current, "text_len", len(tr.Text))
 				if job != nil {

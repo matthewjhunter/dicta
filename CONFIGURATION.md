@@ -323,3 +323,33 @@ Look for these lines:
   — you're running `--audit-enabled`. Make sure you meant to.
 - `cleanup endpoint uses http:// — transcript content will be sent in
   cleartext` — you're sending dictation in cleartext. Use https.
+
+## Recovery: getting unstuck
+
+Closing a session (Pause toggle, or mute via `--unmute-to-dictate`)
+intentionally **lets queued work finish typing** — anything the ASR
+has already started processing will type to completion. If dictation
+ever wedges typing something you don't want (a hallucinated
+repetition loop, a stuck transcript, an unintended utterance still
+draining), the escape hatch is:
+
+> **Toggle the session off and back on once.** Pause-Pause works, or
+> mute-then-unmute on a `--unmute-to-dictate` setup. Re-opening a
+> session bumps the internal epoch, which invalidates every
+> still-pending transcript from the closed session — they're dropped
+> before they reach ydotool.
+
+Other knobs that already suppress most of the failure modes:
+
+- `--strip-disfluencies` filters known Whisper hallucination tokens
+  (`uh`, `um`, `er`, etc.) at the ASR layer.
+- The ASR layer also drops well-known artifact phrases (`Thank you`,
+  `Thanks for watching`) and detects repetition loops; these don't
+  reach the type queue at all.
+- `--vad-min-speech-ms` (default 400 ms) drops utterances that don't
+  contain enough raw-energy speech frames, suppressing the "blip
+  triggers a hallucinated phrase" pattern.
+
+A dedicated cancel command (kill in-flight typing without
+closing-and-reopening) is not implemented in v1; the toggle-twice
+recipe above is the supported workaround.

@@ -324,10 +324,12 @@ func TestSession_OnUtteranceDispatchesWhileOpen(t *testing.T) {
 	}
 }
 
-func TestSession_StaleTranscriptDropped(t *testing.T) {
-	// Slow transcribe ensures we have time to close the session before
-	// the transcript arrives. The handler must observe the epoch bump
-	// and drop.
+func TestSession_QueuedTranscriptDrainsAfterClose(t *testing.T) {
+	// Close without a subsequent re-open must NOT drop in-flight
+	// transcripts — the user pressed Pause (or tapped mute) to end
+	// the session, but expects the words they already said to type.
+	// Only re-open bumps the epoch; close alone leaves queued work
+	// addressed to the still-current epoch.
 	s, typer, _, _, asrFake := newTestSession(t)
 	asrFake.transcribeWait = 200 * time.Millisecond
 
@@ -336,17 +338,17 @@ func TestSession_StaleTranscriptDropped(t *testing.T) {
 	}
 	s.OnUtterance(make([]byte, 1280))
 
-	// Close before the transcribe finishes.
+	// Close before the transcribe finishes; do NOT reopen.
 	time.Sleep(50 * time.Millisecond)
 	if err := s.Toggle(t.Context(), "type"); err != nil {
 		t.Fatal(err)
 	}
 
-	// Wait past the transcribe deadline; the handler should have run
-	// and decided to drop.
+	// Wait past the transcribe deadline; the handler should now type.
 	time.Sleep(400 * time.Millisecond)
-	if got := typer.Calls(); len(got) != 0 {
-		t.Errorf("expected no Type calls (stale transcript dropped); got %v", got)
+	calls := typer.Calls()
+	if len(calls) != 1 || calls[0] != "hello" {
+		t.Errorf("expected Type calls=[hello] (queued transcript drained); got %v", calls)
 	}
 }
 
@@ -990,10 +992,11 @@ func TestSession_ClipModeAuditRecord(t *testing.T) {
 	}
 }
 
-// TestSession_AuditNotInvokedWhenSessionClosed: an utterance that
-// arrives mid-flight after the session closes must not produce an
-// audit record (the epoch gate must drop it before recordAudit).
-func TestSession_AuditNotInvokedAfterClose(t *testing.T) {
+// TestSession_AuditInvokedForDrainedTranscript: an utterance that
+// arrives mid-flight after the session closes (without re-open) is
+// allowed to type AND to audit. Drain-on-close is the user-facing
+// contract; the audit trail follows the typing path.
+func TestSession_AuditInvokedForDrainedTranscript(t *testing.T) {
 	typer := &fakeTyper{}
 	cuer := &fakeCuer{}
 	asrFake := &fakeASR{
@@ -1014,15 +1017,15 @@ func TestSession_AuditNotInvokedAfterClose(t *testing.T) {
 	}
 	s.OnUtterance(make([]byte, 1280))
 
-	// Close before transcribe completes.
+	// Close before transcribe completes; do NOT reopen.
 	time.Sleep(50 * time.Millisecond)
 	if err := s.Toggle(t.Context(), "type"); err != nil {
 		t.Fatal(err)
 	}
 
 	time.Sleep(400 * time.Millisecond)
-	if recs := auditW.Records(); len(recs) != 0 {
-		t.Errorf("expected no audit records (stale transcript dropped); got %v", recs)
+	if recs := auditW.Records(); len(recs) != 1 {
+		t.Errorf("expected 1 audit record (queued transcript drained); got %d", len(recs))
 	}
 }
 
