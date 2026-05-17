@@ -1,5 +1,10 @@
 # dicta
 
+[![CI](https://github.com/matthewjhunter/dicta/actions/workflows/ci.yml/badge.svg)](https://github.com/matthewjhunter/dicta/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/matthewjhunter/dicta.svg)](https://pkg.go.dev/github.com/matthewjhunter/dicta)
+[![Go Report Card](https://goreportcard.com/badge/github.com/matthewjhunter/dicta)](https://goreportcard.com/report/github.com/matthewjhunter/dicta)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 A Linux/Wayland-first voice dictation daemon written in pure Go.
 
 dicta is two things:
@@ -234,4 +239,4 @@ Bugs, typos, packaging contributions: PRs welcome.
 
 ## License
 
-TBD — currently unlicensed. License will land before the v1 tag.
+Apache-2.0 — see [LICENSE](LICENSE).

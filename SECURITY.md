@@ -9,9 +9,12 @@ concrete enforcement point so you can verify the claim.
 
 ## Reporting
 
-Vulnerabilities: open a GitHub security advisory or email
-matthewjayhunter@gmail.com. Do not file public issues for
-exploitable bugs.
+Vulnerabilities: report privately via [GitHub's private vulnerability
+reporting][gh-pvr] for this repository. As a fallback, you can email
+matthewjayhunter@gmail.com. Do not file public issues for exploitable
+bugs.
+
+[gh-pvr]: https://github.com/matthewjhunter/dicta/security/advisories/new
 
 ## Threat model summary
 
