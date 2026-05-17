@@ -1,10 +1,10 @@
 module github.com/matthewjhunter/dicta
 
-go 1.25.0
+go 1.25.10
 
 require github.com/matthewjhunter/asrclient v0.0.0-00010101000000-000000000000
 
-require go.uber.org/goleak v1.3.0 // indirect
+require go.uber.org/goleak v1.3.0
 
 require (
 	gioui.org v0.9.0
