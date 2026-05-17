@@ -175,7 +175,7 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 				m.log.Info("audio.utterance dropped: below min-speech-frames",
 					"raw_speech_frames", rawSpeechCount,
 					"min", m.minRawSpeechFrames,
-					"audio_ms", utterance_ms(len(accumulator)),
+					"audio_ms", utteranceMs(len(accumulator)),
 					"reason", reason)
 			} else {
 				utterance := make([]byte, len(accumulator))
@@ -231,7 +231,7 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 						copy(utterance, accumulator)
 						m.log.Warn("audio.utterance force-split: cap reached",
 							"max_bytes", m.maxUtteranceBytes,
-							"audio_ms", utterance_ms(len(utterance)))
+							"audio_ms", utteranceMs(len(utterance)))
 						m.onUtterance(utterance)
 						accumulator = accumulator[:0]
 					}
@@ -285,10 +285,10 @@ func (m *audioMonitor) Flush() {
 	}
 }
 
-// utterance_ms approximates the audio duration of a PCM byte buffer
+// utteranceMs approximates the audio duration of a PCM byte buffer
 // using the locked D15 frame format (16 kHz mono int16 LE — 32 bytes
 // per ms). Used only for log output; off-by-one is fine.
-func utterance_ms(pcmBytes int) int {
+func utteranceMs(pcmBytes int) int {
 	return pcmBytes / (audio.SampleRateHz * audio.SampleWidth / 1000)
 }
 

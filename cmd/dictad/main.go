@@ -179,7 +179,7 @@ func main() {
 		})
 		asrMon.Start(ctx)
 		defer asrMon.Stop()
-		defer backend.Close()
+		defer func() { _ = backend.Close() }()
 		handler.asr = asrMon
 
 		logger.Info("asr-monitor started", "backend", *asrBackendFlag)
@@ -274,7 +274,7 @@ func main() {
 			logger.Error("audit.new", "err", err)
 			os.Exit(1)
 		}
-		defer auditW.Close()
+		defer func() { _ = auditW.Close() }()
 		if *auditEnabledFlag {
 			logger.Warn("audit enabled — per-utterance transcripts will be written to disk",
 				"directory", *auditDirectoryFlag,
@@ -323,7 +323,7 @@ func main() {
 			logger.Error("audio.start", "err", err)
 			os.Exit(1)
 		}
-		defer audioMon.Stop()
+		defer func() { _ = audioMon.Stop() }()
 		handler.audio = audioMon
 		logger.Info("audio-monitor started", "backend", audioMon.Snapshot().Backend)
 	}
@@ -335,7 +335,7 @@ func main() {
 		logger.Error("listen", "err", err)
 		os.Exit(1)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	logger.Info("dictad started", "version", version, "socket", socketPath, "audio_monitor", *audioMonitorFlag)
 

@@ -21,7 +21,7 @@ type Capture interface {
 	Backend() string // "pipewire" | "pulse"
 }
 
-// Backend selects which subprocess captures audio.
+// CaptureBackend selects which subprocess captures audio.
 type CaptureBackend string
 
 const (
