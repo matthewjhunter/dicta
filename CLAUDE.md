@@ -37,7 +37,7 @@ The packages below must NOT import each other. The mode state machine (open/clos
 
 ```
 internal/audio       capture, VAD, ringbuffer, mic-cue tones, IsQuiet
-internal/asr         thin selector returning an asrclient.Backend per [asr] config
+internal/asr         thin selector returning an asrclient.Transcriber per [asr] config
 internal/whispersup  whisper-server subprocess supervisor (whispercpp backend only)
 internal/cleanup     LLM cleanup client (OpenAI-protocol)
 internal/dispatch    ydotool + wl-copy + notify-send wrappers (no policy)
@@ -86,7 +86,7 @@ Type-mode commits depend on `internal/audio`'s energy VAD firing correctly. The 
 
 Follow §12 of the design doc. Two ordering invariants matter:
 
-- Phase 2 (bootstrap `asrclient` with the Wyoming wire protocol + Backend impl) ships **before** any ASR work in dicta so the default backend has a working transport from day one. asrclient lives at `~/go/src/github.com/matthewjhunter/asrclient`; dicta imports it via go.mod.
+- Phase 2 (bootstrap `asrclient` with the Wyoming wire protocol + Transcriber impl) ships **before** any ASR work in dicta so the default backend has a working transport from day one. asrclient lives at `~/go/src/github.com/matthewjhunter/asrclient`; dicta imports it via go.mod.
 - Phase 8 (control-socket event subscription) ships **before** phase 9 (`dicta-preview`) so the panel has live transcripts to display.
 
 Don't reorder phases without updating the design doc first.

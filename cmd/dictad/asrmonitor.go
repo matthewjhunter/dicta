@@ -15,13 +15,13 @@ import (
 	"github.com/matthewjhunter/dicta/internal/control"
 )
 
-// asrMonitor wraps an asr.Backend with health polling and lightweight
+// asrMonitor wraps an asr.Transcriber with health polling and lightweight
 // transcribe-and-log activity. As of phase 10 the monitor no longer
 // publishes events directly: the session orchestrator owns the
 // transcript publish path because only it knows the mode (and whether
 // to apply LLM cleanup before publishing).
 type asrMonitor struct {
-	backend asr.Backend
+	backend asr.Transcriber
 	logger  *slog.Logger
 	cfg     asrMonitorConfig
 
@@ -97,7 +97,7 @@ func (c asrMonitorConfig) withDefaults() asrMonitorConfig {
 	return c
 }
 
-func newASRMonitor(logger *slog.Logger, backend asr.Backend, cfg asrMonitorConfig) *asrMonitor {
+func newASRMonitor(logger *slog.Logger, backend asr.Transcriber, cfg asrMonitorConfig) *asrMonitor {
 	cfg = cfg.withDefaults()
 	m := &asrMonitor{
 		backend:  backend,
@@ -354,7 +354,7 @@ func (m *asrMonitor) healthLoop(ctx context.Context) {
 func (m *asrMonitor) probe(ctx context.Context) {
 	probeCtx, cancel := context.WithTimeout(ctx, m.cfg.HealthTimeout)
 	defer cancel()
-	if err := m.backend.Healthy(probeCtx); err != nil {
+	if err := m.backend.Ping(probeCtx); err != nil {
 		m.health.Store("unhealthy")
 		m.lastHealthErr.Store(err.Error())
 		return

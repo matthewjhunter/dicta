@@ -15,11 +15,11 @@ type retryConfig struct {
 	MaxAttempts int // 0 = no cap; ctx alone bounds the loop
 }
 
-// retryBackend wraps a Backend so transport errors on Transcribe retry
-// with exponential backoff. Healthy and Close pass through unchanged —
+// retryBackend wraps a Transcriber so transport errors on Transcribe retry
+// with exponential backoff. Ping and Close pass through unchanged —
 // callers control health-probe cadence and connection lifetime.
 type retryBackend struct {
-	inner Backend
+	inner Transcriber
 	cfg   retryConfig
 
 	// sleeper exists so tests can substitute a deterministic timer. It
@@ -27,7 +27,7 @@ type retryBackend struct {
 	sleeper func(ctx context.Context, d time.Duration) error
 }
 
-func newRetryBackend(inner Backend, cfg retryConfig) *retryBackend {
+func newRetryBackend(inner Transcriber, cfg retryConfig) *retryBackend {
 	if cfg.Initial <= 0 {
 		cfg.Initial = time.Second
 	}
@@ -70,7 +70,7 @@ func (r *retryBackend) Transcribe(ctx context.Context, audio []byte, opts Option
 	}
 }
 
-func (r *retryBackend) Healthy(ctx context.Context) error { return r.inner.Healthy(ctx) }
+func (r *retryBackend) Ping(ctx context.Context) error { return r.inner.Ping(ctx) }
 
 func (r *retryBackend) Close() error { return r.inner.Close() }
 

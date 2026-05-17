@@ -295,7 +295,7 @@ type MultiSource interface {
   arrives) can flag it `Initial=true` and the watcher does the right
   thing without source-specific knowledge.
 
-- **No `Healthy()` method.** The interface deliberately does not
+- **No `Ping()` method.** The interface deliberately does not
   expose a health probe. If a source can't start, `Watch` returns
   an error. If a source dies mid-stream, it closes the channel and
   the watcher logs and gives up — there's no graceful re-attach

@@ -14,7 +14,7 @@ import (
 	"github.com/matthewjhunter/dicta/internal/asr"
 )
 
-// fakeASR is a controllable asr.Backend for asrMonitor tests.
+// fakeASR is a controllable asr.Transcriber for asrMonitor tests.
 type fakeASR struct {
 	mu             sync.Mutex
 	transcribeCall atomic.Uint64
@@ -56,7 +56,7 @@ func (f *fakeASR) Transcribe(ctx context.Context, _ []byte, _ asrclient.Options)
 	return f.transcript, f.transcribeErr
 }
 
-func (f *fakeASR) Healthy(_ context.Context) error {
+func (f *fakeASR) Ping(_ context.Context) error {
 	f.healthCall.Add(1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -153,7 +153,7 @@ func TestASRMonitor_DropsAtConcurrencyCap(t *testing.T) {
 	}
 }
 
-func TestASRMonitor_HealthLoopMarksHealthy(t *testing.T) {
+func TestASRMonitor_HealthLoopMarksPing(t *testing.T) {
 	f := &fakeASR{}
 	m := newASRMonitor(discardLogger(), f, asrMonitorConfig{
 		BackendName:    "fake",
@@ -211,8 +211,8 @@ func TestASRMonitor_StopBeforeStart(t *testing.T) {
 }
 
 func TestASRMonitor_BackendInterface(t *testing.T) {
-	// Compile-time check: asr.Backend is what asrMonitor stores.
-	var _ asr.Backend = &fakeASR{}
+	// Compile-time check: asr.Transcriber is what asrMonitor stores.
+	var _ asr.Transcriber = &fakeASR{}
 }
 
 // TestASRMonitor_DropsHallucinationPhrase guards the second layer of

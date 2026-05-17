@@ -26,10 +26,10 @@ var ErrUnknownBackend = errors.New("unknown asr backend")
 // have" from "your config is wrong" once future backends arrive.
 var ErrNotImplemented = errors.New("asr backend not implemented in this phase")
 
-// Backend is the (re-exported) asrclient interface. Calling code outside
-// internal/asr should refer to asr.Backend so phase upgrades (e.g.
-// switching the wyoming wrapper for a fallback chain) don't ripple.
-type Backend = asrclient.Backend
+// Transcriber is the (re-exported) asrclient interface. Calling code
+// outside internal/asr should refer to asr.Transcriber so phase upgrades
+// (e.g. switching the wyoming wrapper for a fallback chain) don't ripple.
+type Transcriber = asrclient.Transcriber
 
 // Options is the (re-exported) asrclient.Options type.
 type Options = asrclient.Options
@@ -37,7 +37,7 @@ type Options = asrclient.Options
 // Transcript is the (re-exported) asrclient.Transcript type.
 type Transcript = asrclient.Transcript
 
-// Select returns a configured Backend per cfg. The returned Backend is
+// Select returns a configured Transcriber per cfg. The returned Transcriber is
 // retry-wrapped where applicable: transport errors trigger
 // exponential-backoff retries until the context ends or the configured
 // MaxAttempts cap is reached.
@@ -45,7 +45,7 @@ type Transcript = asrclient.Transcript
 // For whispercpp, the caller (dictad) is responsible for starting the
 // whisper-server supervisor and populating cfg.WhisperCpp.Endpoint
 // before calling Select — this package never spawns subprocesses.
-func Select(cfg Config) (Backend, error) {
+func Select(cfg Config) (Transcriber, error) {
 	switch strings.ToLower(cfg.Backend) {
 	case "wyoming":
 		return selectWyoming(cfg.Wyoming)
@@ -60,7 +60,7 @@ func Select(cfg Config) (Backend, error) {
 	}
 }
 
-func selectOpenAI(cfg OpenAIConfig) (Backend, error) {
+func selectOpenAI(cfg OpenAIConfig) (Transcriber, error) {
 	cfg = cfg.withDefaults()
 
 	apiKey := cfg.APIKey
@@ -120,7 +120,7 @@ func selectOpenAI(cfg OpenAIConfig) (Backend, error) {
 	}), nil
 }
 
-func selectWhisperCpp(cfg WhisperCppConfig) (Backend, error) {
+func selectWhisperCpp(cfg WhisperCppConfig) (Transcriber, error) {
 	cfg = cfg.withDefaults()
 	if cfg.Endpoint == "" {
 		return nil, errors.New("whispercpp: Endpoint is empty (supervisor must report ready before Select)")
@@ -133,7 +133,7 @@ func selectWhisperCpp(cfg WhisperCppConfig) (Backend, error) {
 	}), nil
 }
 
-func selectWyoming(cfg WyomingConfig) (Backend, error) {
+func selectWyoming(cfg WyomingConfig) (Transcriber, error) {
 	cfg = cfg.withDefaults()
 	addr, err := parseWyomingAddr(cfg.Addr)
 	if err != nil {

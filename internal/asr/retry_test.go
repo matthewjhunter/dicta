@@ -12,7 +12,7 @@ import (
 	"github.com/matthewjhunter/asrclient"
 )
 
-// fakeBackend is a controllable Backend for retry tests.
+// fakeBackend is a controllable Transcriber for retry tests.
 type fakeBackend struct {
 	mu          sync.Mutex
 	calls       int
@@ -35,8 +35,8 @@ func (f *fakeBackend) Transcribe(ctx context.Context, _ []byte, _ asrclient.Opti
 	return tr, nil
 }
 
-func (f *fakeBackend) Healthy(ctx context.Context) error { return nil }
-func (f *fakeBackend) Close() error                      { return nil }
+func (f *fakeBackend) Ping(ctx context.Context) error { return nil }
+func (f *fakeBackend) Close() error                   { return nil }
 
 func (f *fakeBackend) callCount() int {
 	f.mu.Lock()
@@ -217,13 +217,13 @@ func TestIsTransportError(t *testing.T) {
 	}
 }
 
-func TestRetry_PassesThroughHealthyAndClose(t *testing.T) {
+func TestRetry_PassesThroughPingAndClose(t *testing.T) {
 	healthErr := errors.New("unhealthy")
 	closeErr := errors.New("closed")
 	f := &healthBackend{healthErr: healthErr, closeErr: closeErr}
 	r := newRetryBackend(f, retryConfig{Initial: time.Microsecond})
 
-	if got := r.Healthy(t.Context()); !errors.Is(got, healthErr) {
+	if got := r.Ping(t.Context()); !errors.Is(got, healthErr) {
 		t.Errorf("Healthy: got %v want %v", got, healthErr)
 	}
 	if got := r.Close(); !errors.Is(got, closeErr) {
@@ -239,5 +239,5 @@ type healthBackend struct {
 func (h *healthBackend) Transcribe(context.Context, []byte, asrclient.Options) (asrclient.Transcript, error) {
 	return asrclient.Transcript{}, nil
 }
-func (h *healthBackend) Healthy(context.Context) error { return h.healthErr }
-func (h *healthBackend) Close() error                  { return h.closeErr }
+func (h *healthBackend) Ping(context.Context) error { return h.healthErr }
+func (h *healthBackend) Close() error               { return h.closeErr }

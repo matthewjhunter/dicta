@@ -62,7 +62,7 @@ dictation."*
 | ID  | Decision | Rationale |
 |-----|----------|-----------|
 | D1  | Audio capture: spawn `pw-record` (PipeWire) or `parec` (PulseAudio compat) as subprocess | Avoids CGo/PipeWire binding complexity; robust; PipeWire is the daily-driver baseline on modern Ubuntu |
-| D2  | ASR backend: pluggable via the `asrclient.Backend` interface from `github.com/matthewjhunter/asrclient`. Three impls in v1, all selected by config: `wyoming` (default; `asrclient/wyoming.Client` to a Wyoming-protocol STT server such as `wyoming-faster-whisper`), `whispercpp` (`asrclient/whispercpp.Client` to a daemon-supervised `whisper-server` subprocess on loopback), `openai` (`asrclient/openai.Client` to a user-managed OpenAI-protocol HTTP endpoint). The whisper-server *lifecycle* (spawn, port discovery, restart-on-crash, /health gating) lives in `dicta`; the `asrclient/whispercpp` client is just HTTP. | Wyoming is the lingua franca of the local-voice-AI ecosystem; defaulting to it lets `dicta` share an STT server with anything else on the network that speaks Wyoming. `whispercpp` is the standalone option for users without a Wyoming setup; `openai` is for cloud/remote. Protocol code lives in `asrclient` (reusable, single API for all three); subprocess supervision is dicta-specific (configuration, logging, fault recovery integrated with the rest of the daemon). All three avoid CGo and Python. |
+| D2  | ASR backend: pluggable via the `asrclient.Transcriber` interface from `github.com/matthewjhunter/asrclient`. Three impls in v1, all selected by config: `wyoming` (default; `asrclient/wyoming.Client` to a Wyoming-protocol STT server such as `wyoming-faster-whisper`), `whispercpp` (`asrclient/whispercpp.Client` to a daemon-supervised `whisper-server` subprocess on loopback), `openai` (`asrclient/openai.Client` to a user-managed OpenAI-protocol HTTP endpoint). The whisper-server *lifecycle* (spawn, port discovery, restart-on-crash, /health gating) lives in `dicta`; the `asrclient/whispercpp` client is just HTTP. | Wyoming is the lingua franca of the local-voice-AI ecosystem; defaulting to it lets `dicta` share an STT server with anything else on the network that speaks Wyoming. `whispercpp` is the standalone option for users without a Wyoming setup; `openai` is for cloud/remote. Protocol code lives in `asrclient` (reusable, single API for all three); subprocess supervision is dicta-specific (configuration, logging, fault recovery integrated with the rest of the daemon). All three avoid CGo and Python. |
 | D3  | Wakeword: deferred to v2. v2 ships two modes -- `wyoming` (default, pure Go, TCP to a Wyoming wakeword server such as `wyoming-openwakeword`, reusing the `asrclient/wyoming` low-level wire surface) and `embedded` (build-tagged `onnx`, CGo via `yalue/onnxruntime_go`, openWakeWord pipeline). Default builds remain pure Go. | Pure-Go default keeps D13 intact; the embedded path is opt-in for users who want a single binary. The embedded implementation is *reimplemented*, not vendored -- see D16. |
 | D4  | LLM cleanup: OpenAI-protocol HTTP client, configurable endpoint, no default URL | Works with `olla`, `llama.cpp` server, vLLM, Anthropic-compatible gateways, OpenAI itself |
 | D5  | Activation is compositor-bound single-key shortcuts only: **Pause** for type-mode, **Scroll Lock** for clip-mode. No PTT in v1: no evdev sidecar, no `input` group requirement, no second systemd unit. | PTT requires hold-and-release semantics that compositor shortcuts can't deliver, which would force an evdev sidecar. It also costs more keystrokes than tap-toggle, which contradicts the owner's ergonomic constraint (D17). Pause+VAD provides the same controlled-session-with-per-utterance-commit shape with lower keystroke load. |
@@ -76,7 +76,7 @@ dictation."*
 | D13 | The daemon (`dictad`) and CLI (`dicta`) are pure Go, no CGo, no Python -- `CGO_ENABLED=0`, fully static. The `dicta-preview` sidecar is allowed to use any UI toolkit (GTK4, Qt, gioui, etc.) since it is a separate binary on a separate process boundary; the daemon's static-binary and `MemoryDenyWriteExecute` properties are unaffected. | Single static-binary distribution for the security-relevant components; no Python supply chain in the audio/ASR/dispatch path; smaller attack surface for the long-running daemon. The preview panel is short-lived and user-launched. |
 | D14 | Audio capture: `pw-record`/`parec` subprocess in v1 (honors D13). A build-tagged PortAudio backend (`gordonklaus/portaudio`) is reserved as a v2 escape hatch if subprocess proves flaky in practice. | Subprocess loses some determinism (chunk timing, cleaner device enumeration) but keeps the daemon pure Go. The `internal/audio.Capture` interface is shaped so a PortAudio impl can be added later without touching call sites. |
 | D15 | Audio constants locked: 16 kHz, mono, int16 little-endian, 80 ms / 1280-sample chunks. | Standard across the local-voice-AI ecosystem; what Wyoming STT/wake servers expect; what openWakeWord models consume. Lets a future `internal/wake` consume `dicta` audio buffers with no resampling or re-chunking. |
-| D16 | No source dependency on `majordomo` (project on hiatus). The Wyoming wire protocol and the OpenAI-compatible HTTP transcription clients live in a separate `github.com/matthewjhunter/asrclient` module that `dicta` imports; subprocess lifecycle (whisper-server) stays in `dicta`. PCM-format helpers (`IsQuiet`, mic-cue tones) are reimplemented fresh in-tree under `internal/audio`. No `replace` directive against `majordomo`, no `git submodule`, no in-tree vendor of `majordomo` source. | Avoids tying `dicta`'s build to a paused project. Splits protocol from lifecycle so the protocol surface is reusable; `asrclient` is shaped to be the single Backend API for any future voice consumer (including `majordomo` if it un-pauses). |
+| D16 | No source dependency on `majordomo` (project on hiatus). The Wyoming wire protocol and the OpenAI-compatible HTTP transcription clients live in a separate `github.com/matthewjhunter/asrclient` module that `dicta` imports; subprocess lifecycle (whisper-server) stays in `dicta`. PCM-format helpers (`IsQuiet`, mic-cue tones) are reimplemented fresh in-tree under `internal/audio`. No `replace` directive against `majordomo`, no `git submodule`, no in-tree vendor of `majordomo` source. | Avoids tying `dicta`'s build to a paused project. Splits protocol from lifecycle so the protocol surface is reusable; `asrclient` is shaped to be the single Transcriber API for any future voice consumer (including `majordomo` if it un-pauses). |
 | D17 | Hotkey defaults and recommendations are single-key only. v1 default bindings: **Pause** for type-mode toggle, **Scroll Lock** for clip-mode toggle. No modifier-chord bindings in shipped examples, default config, or documentation. Users may still bind chords on their own; `dicta` itself does not constrain compositor bindings. | Owner ergonomic constraint: multi-key chords are physically costly. Pause and Scroll Lock are vestigial keys on modern keyboards, almost never collide with other bindings, and a tap is the lowest possible keystroke load. |
 
 ## 4. Architecture overview
@@ -135,7 +135,7 @@ The following packages must NOT import each other:
 
 ```
 internal/audio       capture, VAD, ringbuffer, mic-cue tones, IsQuiet
-internal/asr         thin selector: reads config, returns an asrclient.Backend
+internal/asr         thin selector: reads config, returns an asrclient.Transcriber
 internal/whispersup  supervises the local whisper-server subprocess
                      (only used when [asr] backend = "whispercpp")
 internal/cleanup     LLM cleanup client (OpenAI-protocol)
@@ -153,7 +153,7 @@ The Wyoming wire protocol and OpenAI-compatible HTTP transcription
 clients live OUTSIDE this repository in
 `github.com/matthewjhunter/asrclient` and are imported as a normal Go
 module dependency (D16). dicta's `internal/asr` is a thin selector that
-reads `[asr] backend = ...` and returns an `asrclient.Backend`;
+reads `[asr] backend = ...` and returns an `asrclient.Transcriber`;
 `internal/whispersup` exists only to spawn and watch the local
 `whisper-server` subprocess when the whispercpp backend is configured.
 
@@ -281,14 +281,14 @@ calibrate_ms = 500       # initial silence assumed for noise-floor calibration
 
 **Responsibilities**
 
-The `Backend` interface, the three protocol implementations, and the
+The `Transcriber` interface, the three protocol implementations, and the
 shared `Options` / `Transcript` / `Segment` types live in
 `github.com/matthewjhunter/asrclient` -- not in this repository. dicta
 imports that module.
 
 dicta provides two thin layers on top:
 
-- `internal/asr.Select(cfg)` returns an `asrclient.Backend` constructed
+- `internal/asr.Select(cfg)` returns an `asrclient.Transcriber` constructed
   from the configured `[asr]` block: `asrclient/wyoming.NewClient(addr)`,
   `asrclient/whispercpp.NewClient(opts...)`, or
   `asrclient/openai.NewClient(apiKey, opts...)`.
@@ -300,12 +300,12 @@ dicta provides two thin layers on top:
   binary path and CLI flags from `[asr.whispercpp]` config; the
   `asrclient/whispercpp.Client` is told the resulting endpoint URL.
 
-**Backend interface (provided by asrclient, repeated here for context):**
+**Transcriber interface (provided by asrclient, repeated here for context):**
 
 ```go
-type Backend interface {
+type Transcriber interface {
     Transcribe(ctx context.Context, audio []byte, opts Options) (Transcript, error)
-    Healthy(ctx context.Context) error
+    Ping(ctx context.Context) error
     Close() error
 }
 
@@ -812,8 +812,8 @@ demonstrable before the next phase begins.
    line-length cap), systemd unit (unhardened first, hardened in
    phase 10).
 2. **Bootstrap `asrclient`.** Separate `github.com/matthewjhunter/asrclient`
-   module with `Backend` interface, audio-format constants, and Wyoming
-   wire protocol + Backend impl (table-driven tests against captured
+   module with `Transcriber` interface, audio-format constants, and Wyoming
+   wire protocol + Transcriber impl (table-driven tests against captured
    wire bytes; integration test gated on a live server). Done before
    any ASR work in `dicta` so the default backend has a working
    transport from day one. `dicta` imports it as a normal dependency.
