@@ -89,6 +89,32 @@ tasks:
     cmds:
       - go vet ./...
 
+  fmt:
+    desc: Check formatting with gofmt.
+    cmds:
+      - |
+        unformatted=$(gofmt -l .)
+        if [ -n "$unformatted" ]; then
+          echo "Unformatted files:"
+          echo "$unformatted"
+          exit 1
+        fi
+
+  fmt:fix:
+    desc: Apply gofmt.
+    cmds:
+      - gofmt -w .
+
+  lint:
+    desc: Run golangci-lint.
+    cmds:
+      - golangci-lint run ./...
+
+  vuln:
+    desc: Run govulncheck.
+    cmds:
+      - govulncheck ./...
+
   tidy:
     desc: Run go mod tidy.
     cmds:
@@ -100,11 +126,14 @@ tasks:
       - rm -rf {{.BIN}}
 
   check:
-    desc: Run vet, tests, and race-tests in one shot.
+    desc: Run all CI checks (vet, fmt, lint, test, test:race, vuln).
     cmds:
       - task: vet
+      - task: fmt
+      - task: lint
       - task: test
       - task: test:race
+      - task: vuln
 
   install:user:
     desc: |
