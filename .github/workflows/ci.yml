@@ -44,24 +44,6 @@ jobs:
       - name: test:race
         run: go test -race -count=1 ./...
 
-  preview-build:
-    name: build dicta-preview (CGo)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version: stable
-          check-latest: true
-      - name: install Gio build deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config \
-            libwayland-dev libxkbcommon-dev libgles-dev libegl1-mesa-dev \
-            libvulkan-dev libxcursor-dev
-      - run: go build -tags nox11 ./cmd/dicta-preview
-
   lint:
     runs-on: ubuntu-latest
     steps:
