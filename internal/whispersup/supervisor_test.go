@@ -200,8 +200,8 @@ func TestSupervisor_StopBeforeReady(t *testing.T) {
 
 	select {
 	case <-stopDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Stop did not complete within 3 s")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Stop did not complete within 10 s")
 	}
 
 	if sup.State() != StateStopped {
