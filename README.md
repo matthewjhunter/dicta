@@ -149,6 +149,19 @@ For GNOME, bind these via `gsettings` (the Settings GUI tries to nudge
 you toward chord shortcuts; bypassing it lets you use unmodified
 single keys). For Sway/Hyprland/KDE, bind in the compositor config.
 
+## Heads-up: ydotoold needs a tweak for type-mode
+
+Type-mode drives `ydotool`, which talks to a long-running `ydotoold`
+user daemon. Out of the box, `ydotoold` leaks accept'd client sockets
+and wedges in roughly a week of normal use — typing silently stops
+working (audio still captures, transcripts still land in the audit log
+if enabled). Tracked upstream; the workaround is two example unit
+files plus a daily restart timer.
+
+See [packaging/systemd/README.md](packaging/systemd/README.md#ydotoold-fd-leak-workaround).
+A one-time `systemctl --user restart ydotoold.service` unsticks an
+already-wedged daemon; the timer prevents recurrence.
+
 ## Optional: LLM cleanup
 
 Off by default. To enable in clip-mode (the preview panel will display

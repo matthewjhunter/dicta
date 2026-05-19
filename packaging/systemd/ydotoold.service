@@ -1,0 +1,27 @@
+[Unit]
+Description=ydotool input synthesis daemon (user)
+Documentation=https://github.com/ReimuNotMoe/ydotool
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+# Wait up to 30 s for systemd-logind to apply the uaccess ACL on
+# /dev/uinput. Without this, the first start after boot races logind
+# and core-dumps with "failed to open uinput device"; Restart=on-failure
+# would recover but leaves a core dump every boot.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 300); do [ -w /dev/uinput ] && exit 0; sleep 0.1; done; exit 1'
+ExecStart=/usr/bin/ydotoold
+Restart=on-failure
+RestartSec=2
+
+# ydotoold leaks accept'd client sockets (~1 per dictation invocation).
+# The default 1024 soft limit can be hit in roughly a week of normal
+# dicta use, after which the daemon wedges in unix_wait_for_peer with a
+# full listen backlog. Pair this with ydotoold-restart.timer to cycle
+# the daemon nightly so leaks never accumulate to either ceiling.
+# See packaging/systemd/README.md ("ydotoold fd-leak workaround").
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target

@@ -38,6 +38,52 @@ Audit data (when `--audit-enabled`) is written to
 which is the reason `ReadWritePaths=%h/.local/share/dicta` is in the
 unit.
 
+## ydotoold fd-leak workaround
+
+`ydotoold` (the input-synthesis daemon dicta talks to in type-mode)
+leaks accept'd client sockets — roughly one per dictation invocation.
+With the default `LimitNOFILE=1024`, a moderately active user wedges
+the daemon in about a week: new `ydotool` clients block forever in
+`unix_wait_for_peer` with the listen backlog full. From dicta's side
+this looks like "audio captures and processes, but nothing is typed";
+the audit log (when enabled) still records transcripts.
+
+Confirmed on Ubuntu 25.10 with ydotool 1.0.4. Tracked upstream is on
+the to-do list; the symptom is well-defined enough to paper over.
+
+Two example units in this directory implement the workaround:
+
+```sh
+install -m 0644 packaging/systemd/ydotoold.service ~/.config/systemd/user/
+install -m 0644 packaging/systemd/ydotoold-restart.service ~/.config/systemd/user/
+install -m 0644 packaging/systemd/ydotoold-restart.timer ~/.config/systemd/user/
+
+systemctl --user daemon-reload
+systemctl --user enable --now ydotoold.service
+systemctl --user enable --now ydotoold-restart.timer
+```
+
+What this does:
+
+- `ydotoold.service` bumps `LimitNOFILE` to 65536 — enough headroom
+  that even heavy daily use stays well below the ceiling.
+- `ydotoold-restart.timer` fires daily (with up to 15 min jitter) and
+  triggers `ydotoold-restart.service`, which restarts ydotoold to drop
+  accumulated leaked sockets. `Persistent=true` so a missed run on a
+  suspended laptop catches up on resume.
+
+Verify:
+
+```sh
+systemctl --user list-timers ydotoold-restart.timer
+systemctl --user show ydotoold.service -p LimitNOFILE
+ls /proc/$(systemctl --user show -p MainPID --value ydotoold.service)/fd | wc -l
+```
+
+If you already wedged ydotoold (typing silently broken), restart it
+once by hand — `systemctl --user restart ydotoold.service`. The timer
+prevents it from happening again.
+
 ## Configuring flags
 
 `ExecStart=/usr/local/bin/dictad` runs with no arguments by default.

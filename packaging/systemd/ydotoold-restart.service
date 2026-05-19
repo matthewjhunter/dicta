@@ -1,0 +1,7 @@
+[Unit]
+Description=Nightly restart of ydotoold to drop leaked client sockets
+Documentation=https://github.com/ReimuNotMoe/ydotool
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --user restart ydotoold.service

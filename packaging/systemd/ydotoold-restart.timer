@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily timer to restart ydotoold (clear leaked fds)
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15m
+Unit=ydotoold-restart.service
+
+[Install]
+WantedBy=timers.target
