@@ -78,7 +78,7 @@ sudo ./scripts/install-deps-fedora.sh
 sudo ./scripts/install-deps-arch.sh
 ```
 
-These install: Go 1.24+, the Gio system libraries (Wayland, xkbcommon,
+These install: Go 1.25+, the Gio system libraries (Wayland, xkbcommon,
 GLES, EGL, libvulkan, libXcursor) for the preview panel, ydotool, and
 wl-clipboard.
 

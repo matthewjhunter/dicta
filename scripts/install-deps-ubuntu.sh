@@ -67,7 +67,7 @@ if ! command -v go >/dev/null; then
     cat <<'EOF'
 
 Note: Go was not detected on PATH. Ubuntu's apt package (golang-go) is
-often older than dicta requires. Install Go 1.24+ from
+often older than dicta requires. Install Go 1.25+ from
 https://go.dev/dl/ or via your toolchain manager (g, asdf, etc.) before
 running `task build:all`.
 EOF

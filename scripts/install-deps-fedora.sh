@@ -58,7 +58,7 @@ if ! command -v go >/dev/null; then
     cat <<'EOF'
 
 Note: Go was not detected on PATH. Fedora's `golang` package is
-usually current, but if you're on an older release install Go 1.24+
+usually current, but if you're on an older release install Go 1.25+
 from https://go.dev/dl/ or via your toolchain manager.
 EOF
 fi
