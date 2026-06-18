@@ -9,10 +9,17 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
 )
+
+// ErrTyperBreakerOpen is returned by Type when the circuit breaker is open:
+// ydotool has failed repeatedly, so the typer sheds load instead of invoking
+// it (and hanging) on every utterance. The breaker probes again after
+// BreakerCooldown and closes on the first success.
+var ErrTyperBreakerOpen = errors.New("dispatch.type: circuit breaker open -- ydotool unresponsive, typing disabled")
 
 // Typer dispatches text to the keyboard via ydotool. Implementations are
 // dumb wrappers — no session state, no commit-gate logic. Per D12 the
@@ -54,6 +61,20 @@ type TyperConfig struct {
 	// BinaryAllowlist gates the Binary path. Empty = DefaultBinaryAllowlist.
 	BinaryAllowlist []string
 
+	// BreakerThreshold is the number of consecutive Type failures that trips
+	// the circuit breaker. Once tripped, Type returns ErrTyperBreakerOpen
+	// without invoking ydotool until a probe succeeds. 0 = 3.
+	BreakerThreshold int
+
+	// BreakerCooldown is how long the breaker stays fully open before it
+	// allows a single probe invocation (half-open). A successful probe closes
+	// the breaker; a failed one restarts the cooldown. 0 = 30 s.
+	BreakerCooldown time.Duration
+
+	// Notify, if set, is called exactly once when the breaker opens, to
+	// surface the outage to the user. nil = a best-effort `notify-send`.
+	Notify func(title, body string)
+
 	// Logger receives WARN/INFO output. Defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -80,10 +101,28 @@ func (c TyperConfig) withDefaults() TyperConfig {
 	if len(c.BinaryAllowlist) == 0 {
 		c.BinaryAllowlist = DefaultBinaryAllowlist()
 	}
+	if c.BreakerThreshold <= 0 {
+		c.BreakerThreshold = 3
+	}
+	if c.BreakerCooldown <= 0 {
+		c.BreakerCooldown = 30 * time.Second
+	}
+	if c.Notify == nil {
+		c.Notify = defaultNotify
+	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
 	return c
+}
+
+// defaultNotify shells out to notify-send as a best-effort desktop
+// notification. argv is fixed (no user input), so a PATH lookup is acceptable
+// here; failures are swallowed -- a missing notifier must not affect dispatch.
+func defaultNotify(title, body string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "notify-send", title, body).Run()
 }
 
 // Validate checks that c is well-formed and that the configured Binary
@@ -133,6 +172,17 @@ func pathOnAllowlist(path string, allowlist []string) error {
 // dictation cannot be re-interpreted as a flag.
 type SubprocessTyper struct {
 	cfg TyperConfig
+
+	// now returns the current time; overridable in tests. Set by the
+	// constructor to time.Now.
+	now func() time.Time
+
+	// mu guards the circuit-breaker state below.
+	mu                  sync.Mutex
+	consecutiveFailures int
+	open                bool
+	openedAt            time.Time
+	notified            bool
 }
 
 // NewSubprocessTyper validates cfg and constructs the typer. Returns an
@@ -143,7 +193,7 @@ func NewSubprocessTyper(cfg TyperConfig) (*SubprocessTyper, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	return &SubprocessTyper{cfg: cfg.withDefaults()}, nil
+	return &SubprocessTyper{cfg: cfg.withDefaults(), now: time.Now}, nil
 }
 
 // Type strips '\n' (D12), splits text into ChunkSize-bounded pieces, and
@@ -160,6 +210,21 @@ func (t *SubprocessTyper) Type(ctx context.Context, text string) error {
 		return nil
 	}
 
+	// Circuit breaker: once ydotool has failed repeatedly, skip invoking it
+	// (each call otherwise hangs for the full per-invoke timeout) until the
+	// cooldown elapses and a single probe is allowed through.
+	if !t.breakerAllowAttempt() {
+		return ErrTyperBreakerOpen
+	}
+
+	err := t.typeChunks(ctx, text)
+	t.recordResult(ctx, err)
+	return err
+}
+
+// typeChunks splits text and invokes ydotool once per chunk, with ChunkDelay
+// between invocations.
+func (t *SubprocessTyper) typeChunks(ctx context.Context, text string) error {
 	chunks := chunkString(text, t.cfg.ChunkSize)
 	for i, chunk := range chunks {
 		if i > 0 {
@@ -174,6 +239,63 @@ func (t *SubprocessTyper) Type(ctx context.Context, text string) error {
 		}
 	}
 	return nil
+}
+
+// breakerAllowAttempt reports whether Type may invoke ydotool now: true when
+// the breaker is closed, or when it is open but BreakerCooldown has elapsed
+// since it tripped (a half-open probe); false while open and still cooling down.
+func (t *SubprocessTyper) breakerAllowAttempt() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.open {
+		return true
+	}
+	return t.now().Sub(t.openedAt) >= t.cfg.BreakerCooldown
+}
+
+// recordResult updates breaker state after a Type attempt. A context
+// cancellation is not counted as a ydotool failure. A real failure increments
+// the consecutive count and trips the breaker at BreakerThreshold (notifying
+// once); a failed half-open probe restarts the cooldown. Any success closes the
+// breaker and clears the count. The user notification fires outside the lock so
+// a slow notifier cannot stall concurrent Type callers.
+func (t *SubprocessTyper) recordResult(ctx context.Context, err error) {
+	if err != nil && ctx.Err() != nil {
+		return // canceled, not a ydotool failure
+	}
+
+	var notify bool
+	t.mu.Lock()
+	switch {
+	case err == nil:
+		if t.open || t.consecutiveFailures > 0 {
+			t.cfg.Logger.Info("dispatch.type: ydotool recovered, circuit breaker closed")
+		}
+		t.consecutiveFailures = 0
+		t.open = false
+		t.notified = false
+	case t.open:
+		// A half-open probe failed; restart the cooldown.
+		t.consecutiveFailures++
+		t.openedAt = t.now()
+	default:
+		t.consecutiveFailures++
+		if t.consecutiveFailures >= t.cfg.BreakerThreshold {
+			t.open = true
+			t.openedAt = t.now()
+			t.cfg.Logger.Warn("dispatch.type: circuit breaker opened; typing disabled until ydotool recovers",
+				"consecutive_failures", t.consecutiveFailures, "cooldown", t.cfg.BreakerCooldown)
+			if !t.notified {
+				t.notified = true
+				notify = true
+			}
+		}
+	}
+	t.mu.Unlock()
+
+	if notify {
+		t.cfg.Notify("dicta", "typing disabled -- ydotool is unresponsive")
+	}
 }
 
 // invoke runs ydotool once for a single chunk. argv is fully typed; the

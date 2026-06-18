@@ -234,6 +234,87 @@ func TestTyper_BadExitSurfacedAsError(t *testing.T) {
 	}
 }
 
+// TestTyper_CircuitBreakerOpensBlocksAndNotifies: after BreakerThreshold
+// consecutive ydotool failures the breaker opens, further Type calls are shed
+// without invoking ydotool, and exactly one user notification is emitted.
+func TestTyper_CircuitBreakerOpensBlocksAndNotifies(t *testing.T) {
+	cfg, _ := stubTyperConfig(t)
+	t.Setenv("DICTA_DISPATCH_STUB_EXIT", "3") // every invocation fails
+	cfg.BreakerThreshold = 3
+	cfg.BreakerCooldown = time.Hour // long, so no probe fires during the test
+	var notifications int
+	cfg.Notify = func(_, _ string) { notifications++ }
+	tp, err := NewSubprocessTyper(cfg)
+	if err != nil {
+		t.Fatalf("NewSubprocessTyper: %v", err)
+	}
+
+	// The stub exits non-zero before logging, so failed invocations are not
+	// recorded; instead distinguish "invoked ydotool and it failed" (a real
+	// error, not the sentinel) from "shed without invoking" (ErrTyperBreakerOpen).
+	for i := 1; i <= 3; i++ {
+		err := tp.Type(t.Context(), "x")
+		if err == nil {
+			t.Fatalf("attempt %d: expected failure", i)
+		}
+		if errors.Is(err, ErrTyperBreakerOpen) {
+			t.Fatalf("attempt %d: breaker tripped too early (before threshold)", i)
+		}
+	}
+
+	// Breaker now open: Type is shed without invoking ydotool.
+	if err := tp.Type(t.Context(), "x"); !errors.Is(err, ErrTyperBreakerOpen) {
+		t.Errorf("expected ErrTyperBreakerOpen once open, got %v", err)
+	}
+	if notifications != 1 {
+		t.Errorf("expected exactly one notification on open, got %d", notifications)
+	}
+}
+
+// TestTyper_CircuitBreakerHalfOpenProbeCloses: while open the breaker sheds
+// calls, but after BreakerCooldown elapses it allows one probe; a successful
+// probe closes the breaker and normal typing resumes -- no daemon restart.
+func TestTyper_CircuitBreakerHalfOpenProbeCloses(t *testing.T) {
+	cfg, logPath := stubTyperConfig(t)
+	t.Setenv("DICTA_DISPATCH_STUB_EXIT", "3")
+	cfg.BreakerThreshold = 2
+	cfg.BreakerCooldown = time.Minute
+	cfg.Notify = func(_, _ string) {}
+	tp, err := NewSubprocessTyper(cfg)
+	if err != nil {
+		t.Fatalf("NewSubprocessTyper: %v", err)
+	}
+	clock := time.Unix(0, 0)
+	tp.now = func() time.Time { return clock }
+
+	// Two failures trip the breaker (opened at clock).
+	for i := 1; i <= 2; i++ {
+		if err := tp.Type(t.Context(), "x"); err == nil {
+			t.Fatalf("attempt %d: expected failure", i)
+		}
+	}
+	// Still within cooldown: shed.
+	if err := tp.Type(t.Context(), "x"); !errors.Is(err, ErrTyperBreakerOpen) {
+		t.Fatalf("within cooldown: expected ErrTyperBreakerOpen, got %v", err)
+	}
+	invBefore := len(readInvocations(t, logPath))
+
+	// ydotool recovers; advance past the cooldown so a probe is allowed.
+	os.Setenv("DICTA_DISPATCH_STUB_EXIT", "0")
+	clock = clock.Add(2 * time.Minute)
+
+	if err := tp.Type(t.Context(), "x"); err != nil {
+		t.Fatalf("half-open probe after recovery should succeed, got %v", err)
+	}
+	if got := len(readInvocations(t, logPath)); got != invBefore+1 {
+		t.Errorf("probe should invoke ydotool exactly once; before=%d after=%d", invBefore, got)
+	}
+	// Breaker closed: normal typing resumes (not shed).
+	if err := tp.Type(t.Context(), "y"); err != nil {
+		t.Errorf("after recovery typing should work, got %v", err)
+	}
+}
+
 func TestTyper_BinaryNotExistReturnsError(t *testing.T) {
 	cfg, _ := stubTyperConfig(t)
 	cfg.Binary = "/usr/bin/this-binary-does-not-exist-xyz"
