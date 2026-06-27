@@ -22,8 +22,8 @@ when you press a key and stops when the session ends.
 
 ## Status
 
-Pre-1.0. The full v1 build (phases 1–13 of the design) is functional;
-this is the docs phase. Use it, but expect rough edges and please file
+Pre-1.0; latest tag is `v0.1.1`. The full v1 build (phases 1-13 of the
+design) is functional. Use it, but expect rough edges and please file
 issues.
 
 ## Why
@@ -145,9 +145,14 @@ journalctl --user -u dictad.service -f
 | Pause | Toggle type-mode session | `dicta toggle_talk --mode type` |
 | Scroll Lock | Toggle clip-mode panel | `dicta toggle_talk --mode clip` |
 
-For GNOME, bind these via `gsettings` (the Settings GUI tries to nudge
-you toward chord shortcuts; bypassing it lets you use unmodified
-single keys). For Sway/Hyprland/KDE, bind in the compositor config.
+On GNOME, the bindings are scripted -- `task install:keybindings` (or
+`scripts/setup-keybindings-gnome.sh` directly) sets both via `gsettings`,
+idempotently, preserving any other custom keybindings. It bypasses the
+Settings GUI, which nudges you toward chord shortcuts, so you keep the
+unmodified single keys; each binding also wraps `systemctl --user start
+dictad` so the daemon auto-launches on first press. Re-run with
+`--uninstall` to remove. For Sway/Hyprland/KDE, bind in the compositor
+config (see [CONFIGURATION.md](CONFIGURATION.md)).
 
 ## Heads-up: ydotoold needs a tweak for type-mode
 
