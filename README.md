@@ -9,10 +9,10 @@ A Linux/Wayland-first voice dictation daemon written in pure Go.
 
 dicta is two things:
 
-1. **Type-mode** — press **Pause**, talk, and the daemon types the
+1. **Type-mode** -- press **Pause**, talk, and the daemon types the
    transcribed text into whatever window has focus, committing each
    utterance on VAD silence. Press **Pause** again to stop.
-2. **Clip-mode** — press **Scroll Lock**, talk, and a small editable
+2. **Clip-mode** -- press **Scroll Lock**, talk, and a small editable
    panel appears with the cleaned transcript. Press **Enter** to copy
    the buffer to the clipboard, **Shift+Enter** to insert a newline,
    **Esc** to cancel.
@@ -35,7 +35,7 @@ a single static Go binary that:
 
 - Runs anywhere Wayland and PipeWire run.
 - Talks to any Wyoming-protocol ASR server (faster-whisper et al.) by
-  default — no model download in v1.
+  default -- no model download in v1.
 - Optionally talks to a local `whisper-server` (subprocess-managed),
   or any OpenAI-compatible transcription endpoint.
 - Optionally cleans transcripts with any OpenAI-compatible LLM
@@ -102,16 +102,16 @@ Installs to `~/.local/bin` and drops the systemd user unit into
 ### 4. Bring up an ASR backend
 
 The default backend is Wyoming. You can run any Wyoming-compatible
-service — most users want
+service -- most users want
 [wyoming-faster-whisper](https://github.com/rhasspy/wyoming-faster-whisper).
 A common setup is its Docker image listening on `tcp://localhost:10300`.
 
 Other backends:
 
-- `--asr-backend whispercpp` — dicta supervises a local
+- `--asr-backend whispercpp` -- dicta supervises a local
   `whisper-server` subprocess. Requires you to install
   `whisper.cpp/whisper-server` and a model.
-- `--asr-backend openai` — point at any OpenAI-compatible
+- `--asr-backend openai` -- point at any OpenAI-compatible
   `/v1/audio/transcriptions` endpoint. Requires an API key.
 
 See [CONFIGURATION.md](CONFIGURATION.md) for every flag.
@@ -158,7 +158,7 @@ config (see [CONFIGURATION.md](CONFIGURATION.md)).
 
 Type-mode drives `ydotool`, which talks to a long-running `ydotoold`
 user daemon. Out of the box, `ydotoold` leaks accept'd client sockets
-and wedges in roughly a week of normal use — typing silently stops
+and wedges in roughly a week of normal use -- typing silently stops
 working (audio still captures, transcripts still land in the audit log
 if enabled). Tracked upstream; the workaround is two example unit
 files plus a daily restart timer.
@@ -204,18 +204,18 @@ audio. Both default off because both are sensitive by definition.
 
 v1 ships exactly two compositor bindings (D17 in the design doc): Pause
 for type-mode, Scroll Lock for clip-mode. There is no global commit or
-cancel hotkey — clip-mode commits via panel-local Enter and type-mode
+cancel hotkey -- clip-mode commits via panel-local Enter and type-mode
 commits per-utterance via VAD silence. PTT (push-to-talk) and wakeword
 are **out of scope for v1** and are tracked in §14 of the design doc.
 
 ## Documentation
 
-- [dicta-design.md](dicta-design.md) — the design spec (v0.2). Read
+- [dicta-design.md](dicta-design.md) -- the design spec (v0.2). Read
   this before opening a non-trivial PR.
-- [CONFIGURATION.md](CONFIGURATION.md) — every flag.
-- [SECURITY.md](SECURITY.md) — security model and the code paths that
+- [CONFIGURATION.md](CONFIGURATION.md) -- every flag.
+- [SECURITY.md](SECURITY.md) -- security model and the code paths that
   enforce it.
-- [packaging/systemd/README.md](packaging/systemd/README.md) — systemd
+- [packaging/systemd/README.md](packaging/systemd/README.md) -- systemd
   unit install and override patterns.
 
 ## Building from source (no Taskfile)
@@ -251,10 +251,10 @@ go test -fuzz=FuzzCommandUnmarshal -fuzztime=1m ./internal/control
 
 The design doc's §13 lists the open decision points; everything else
 is locked. If you want to change a locked decision, file an issue
-explaining why before writing code — these were deliberate.
+explaining why before writing code -- these were deliberate.
 
 Bugs, typos, packaging contributions: PRs welcome.
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+Apache-2.0 -- see [LICENSE](LICENSE).
