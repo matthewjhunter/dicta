@@ -31,6 +31,8 @@ type recordingHandler struct {
 	toggleCalls   []string
 	commitCalls   []string
 	cancelCalls   int
+	suspendCalls  int
+	resumeCalls   int
 	shutdownCalls int
 
 	statusInfo control.StatusInfo
@@ -70,6 +72,18 @@ func (h *recordingHandler) MicList(_ context.Context) ([]control.MicInfo, error)
 }
 func (h *recordingHandler) MicSelect(_ context.Context, _ string, _ bool) error {
 	return control.ErrNotImplemented
+}
+func (h *recordingHandler) Suspend(_ context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.suspendCalls++
+	return nil
+}
+func (h *recordingHandler) Resume(_ context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.resumeCalls++
+	return nil
 }
 func (h *recordingHandler) Subscribe(_ context.Context, _ []string, _ control.EventPush) error {
 	return control.ErrNotImplemented

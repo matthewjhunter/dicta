@@ -112,6 +112,8 @@ func (noopHandler) Commit(_ context.Context, _ string) error            { return
 func (noopHandler) Cancel(_ context.Context) error                      { return nil }
 func (noopHandler) MicList(_ context.Context) ([]MicInfo, error)        { return nil, nil }
 func (noopHandler) MicSelect(_ context.Context, _ string, _ bool) error { return nil }
+func (noopHandler) Suspend(_ context.Context) error                     { return nil }
+func (noopHandler) Resume(_ context.Context) error                      { return nil }
 func (noopHandler) Subscribe(_ context.Context, _ []string, _ EventPush) error {
 	return nil
 }

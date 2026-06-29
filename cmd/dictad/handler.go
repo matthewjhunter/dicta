@@ -19,6 +19,10 @@ type stubHandler struct {
 	asr     *asrMonitor
 	session *session
 	bus     *eventBus
+	// watcher is the unmute-to-dictate mute watcher, set only when
+	// --unmute-to-dictate is enabled. nil means the feature is off, in
+	// which case Suspend/Resume report ErrUnavailable.
+	watcher *muteWatcher
 }
 
 func (h *stubHandler) Status(ctx context.Context) (control.StatusInfo, error) {
@@ -35,6 +39,13 @@ func (h *stubHandler) Status(ctx context.Context) (control.StatusInfo, error) {
 	}
 	if h.asr != nil {
 		info.ASR = h.asr.Snapshot()
+	}
+	if h.watcher != nil {
+		if susp, reason := h.watcher.Suspended(); susp {
+			info.AutoActivation = "suspended (" + reason + ")"
+		} else {
+			info.AutoActivation = "active"
+		}
 	}
 	return info, nil
 }
@@ -66,6 +77,22 @@ func (h *stubHandler) MicList(ctx context.Context) ([]control.MicInfo, error) {
 
 func (h *stubHandler) MicSelect(ctx context.Context, name string, reset bool) error {
 	return control.ErrNotImplemented
+}
+
+func (h *stubHandler) Suspend(ctx context.Context) error {
+	if h.watcher == nil {
+		return control.ErrUnavailable
+	}
+	h.watcher.Suspend("manual")
+	return nil
+}
+
+func (h *stubHandler) Resume(ctx context.Context) error {
+	if h.watcher == nil {
+		return control.ErrUnavailable
+	}
+	h.watcher.Resume()
+	return nil
 }
 
 func (h *stubHandler) Subscribe(ctx context.Context, events []string, push control.EventPush) error {

@@ -74,6 +74,8 @@ func main() {
 	unmuteToDictateFlag := flag.Bool("unmute-to-dictate", false, "DEFAULT-OFF. Open type-mode automatically when the configured mic transitions from muted to unmuted, and close on the reverse. Always-listening + auto-activation is opt-in; see mute-source-design.md §3.")
 	unmuteSourceFlag := flag.String("unmute-source", "auto", "Mute-detection backend when --unmute-to-dictate is on: `auto` (default — race pcm-zero+pipewire, first to fire wins), `pcm-zero` (all-zero PCM frames; works on MXL AC-44; needs --audio-monitor), or `pipewire` (wpctl poll on the mic's mute property; works on mics that expose mute via the UAC mute control unit).")
 	unmuteDebounceFlag := flag.Duration("unmute-to-dictate-debounce", 1*time.Second, "minimum duration a mute-state change must persist before the watcher fires a transition. Lower for snappier response, raise if you see spurious toggles.")
+	unmuteFlapWindowFlag := flag.Duration("unmute-flap-window", defaultFlapWindow, "sliding window for the unmute-to-dictate flap guard: if more than --unmute-flap-threshold transitions fire within this window, the watcher auto-suspends (a noise-gated non-dictation device would otherwise loop the mic-cue beep). Resume with `dicta resume`.")
+	unmuteFlapThresholdFlag := flag.Int("unmute-flap-threshold", defaultFlapThreshold, "transitions-per-window before the unmute-to-dictate flap guard auto-suspends. 0 disables the guard.")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -306,11 +308,17 @@ func main() {
 				os.Exit(1)
 			}
 			watcher := newMuteWatcher(logger, sess, debounce)
+			watcher.SetFlapGuard(*unmuteFlapWindowFlag, *unmuteFlapThresholdFlag)
+			watcher.SetDevice(*audioDeviceFlag)
+			watcher.SetNotify(dispatch.DefaultNotify)
+			handler.watcher = watcher
 			go watcher.Run(ctx, ch)
 			logger.Info("unmute-to-dictate enabled",
 				"source", src.Name(),
 				"describe", src.Describe(),
-				"debounce", debounce)
+				"debounce", debounce,
+				"flap_window", *unmuteFlapWindowFlag,
+				"flap_threshold", *unmuteFlapThresholdFlag)
 		}
 	} else if audioMon != nil {
 		// Audio without ASR: keep utterance counting alive, but no
