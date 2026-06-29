@@ -229,6 +229,152 @@ func TestMuteWatcher_MinimalDebounceStillFires(t *testing.T) {
 	}
 }
 
+// startWatcherCustom is like startWatcher but lets the caller tweak the
+// watcher (flap guard, notify hook, device) before Run starts.
+func startWatcherCustom(t *testing.T, debounce time.Duration, configure func(*muteWatcher)) (*fakeToggler, *muteWatcher, chan<- mute.Event, func()) {
+	t.Helper()
+	tog := &fakeToggler{}
+	w := newMuteWatcher(discardWatcherLogger(), tog, debounce)
+	if configure != nil {
+		configure(w)
+	}
+	ch := make(chan mute.Event, 64)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		w.Run(ctx, ch)
+		close(done)
+	}()
+	stop := func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("watcher.Run did not return within 2s")
+		}
+	}
+	return tog, w, ch, stop
+}
+
+func TestMuteWatcher_SuspendIgnoresTransitions(t *testing.T) {
+	tog, w, ch, stop := startWatcherCustom(t, testDebounce, nil)
+	defer stop()
+
+	ch <- initial(mute.Muted)
+	w.Suspend("manual")
+	ch <- transition(mute.Unmuted)
+	settle(testDebounce)
+
+	o, c, _ := tog.snapshot()
+	if o != 0 || c != 0 {
+		t.Errorf("suspended watcher must not fire; got opens=%d closes=%d", o, c)
+	}
+	if susp, reason := w.Suspended(); !susp || reason != "manual" {
+		t.Errorf("Suspended()=%v,%q; want true,\"manual\"", susp, reason)
+	}
+}
+
+func TestMuteWatcher_ResumeReenablesFiring(t *testing.T) {
+	tog, w, ch, stop := startWatcherCustom(t, testDebounce, nil)
+	defer stop()
+
+	ch <- initial(mute.Muted)
+	w.Suspend("manual")
+	w.Resume()
+	if susp, _ := w.Suspended(); susp {
+		t.Fatalf("watcher still suspended after Resume")
+	}
+	ch <- transition(mute.Unmuted)
+	settle(testDebounce)
+
+	o, _, _ := tog.snapshot()
+	if o != 1 {
+		t.Errorf("resumed watcher should fire; got opens=%d", o)
+	}
+}
+
+func TestMuteWatcher_NoStaleFireAfterResume(t *testing.T) {
+	// While suspended the watcher tracks state from events. A transition
+	// observed during suspension must not be replayed on Resume.
+	tog, w, ch, stop := startWatcherCustom(t, testDebounce, nil)
+	defer stop()
+
+	ch <- initial(mute.Muted)
+	w.Suspend("manual")
+	ch <- transition(mute.Unmuted) // observed-but-ignored; lastState -> unmuted
+	settle(testDebounce)
+	w.Resume()
+	settle(testDebounce) // no new events after resume
+
+	o, c, _ := tog.snapshot()
+	if o != 0 || c != 0 {
+		t.Errorf("Resume must not replay a transition seen while suspended; got opens=%d closes=%d", o, c)
+	}
+}
+
+func TestMuteWatcher_FlapAutoSuspends(t *testing.T) {
+	var (
+		nmu     sync.Mutex
+		notifns int
+	)
+	_, w, ch, stop := startWatcherCustom(t, testDebounce, func(w *muteWatcher) {
+		w.SetFlapGuard(10*time.Second, 3)
+		w.SetDevice("alsa_input.test")
+		w.SetNotify(func(_, _ string) {
+			nmu.Lock()
+			notifns++
+			nmu.Unlock()
+		})
+	})
+	defer stop()
+
+	ch <- initial(mute.Muted)
+	// Four fires (open, close, open, close) within the window; threshold
+	// is 3, so the fourth trips the guard.
+	states := []mute.State{mute.Unmuted, mute.Muted, mute.Unmuted, mute.Muted}
+	for _, s := range states {
+		ch <- transition(s)
+		settle(testDebounce)
+	}
+	// A further transition must be ignored now that we are suspended.
+	ch <- transition(mute.Unmuted)
+	settle(testDebounce)
+
+	if susp, reason := w.Suspended(); !susp || reason != "flapping" {
+		t.Errorf("Suspended()=%v,%q; want true,\"flapping\"", susp, reason)
+	}
+	if got := w.fired.Load(); got != 4 {
+		t.Errorf("fired=%d; want 4 (guard trips on the 4th, later transitions ignored)", got)
+	}
+	nmu.Lock()
+	n := notifns
+	nmu.Unlock()
+	if n != 1 {
+		t.Errorf("notify called %d times; want exactly 1 on auto-suspend", n)
+	}
+}
+
+func TestMuteWatcher_FlapGuardDisabled(t *testing.T) {
+	// threshold <= 0 disables the guard: rapid flapping keeps firing.
+	_, w, ch, stop := startWatcherCustom(t, testDebounce, func(w *muteWatcher) {
+		w.SetFlapGuard(10*time.Second, 0)
+	})
+	defer stop()
+
+	ch <- initial(mute.Muted)
+	for _, s := range []mute.State{mute.Unmuted, mute.Muted, mute.Unmuted, mute.Muted, mute.Unmuted} {
+		ch <- transition(s)
+		settle(testDebounce)
+	}
+
+	if susp, _ := w.Suspended(); susp {
+		t.Errorf("guard disabled (threshold 0) must never auto-suspend")
+	}
+	if got := w.fired.Load(); got != 5 {
+		t.Errorf("fired=%d; want 5 with guard disabled", got)
+	}
+}
+
 func TestMuteWatcher_HandlesUnseededTransitionDefensively(t *testing.T) {
 	// A source that skips its Initial event sends a transition first.
 	// The watcher must treat it as a seed and not fire.
