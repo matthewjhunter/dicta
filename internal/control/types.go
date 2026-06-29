@@ -35,6 +35,8 @@ type Handler interface {
 	Cancel(ctx context.Context) error
 	MicList(ctx context.Context) ([]MicInfo, error)
 	MicSelect(ctx context.Context, name string, reset bool) error
+	Suspend(ctx context.Context) error
+	Resume(ctx context.Context) error
 	Subscribe(ctx context.Context, events []string, push EventPush) error
 	Shutdown(ctx context.Context) error
 }

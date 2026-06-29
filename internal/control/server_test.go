@@ -31,6 +31,11 @@ type fakeHandler struct {
 	micListErr error
 	micSelErr  error
 
+	suspendErr   error
+	resumeErr    error
+	suspendFired atomic.Bool
+	resumeFired  atomic.Bool
+
 	subErr   error
 	subPush  EventPush
 	subEvts  []string
@@ -78,6 +83,18 @@ func (h *fakeHandler) MicSelect(ctx context.Context, name string, reset bool) er
 	h.micSelName = name
 	h.micSelReset = reset
 	return h.micSelErr
+}
+func (h *fakeHandler) Suspend(ctx context.Context) error {
+	h.suspendFired.Store(true)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.suspendErr
+}
+func (h *fakeHandler) Resume(ctx context.Context) error {
+	h.resumeFired.Store(true)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.resumeErr
 }
 func (h *fakeHandler) Subscribe(ctx context.Context, events []string, push EventPush) error {
 	h.mu.Lock()
@@ -208,6 +225,46 @@ func TestNotImplemented(t *testing.T) {
 	r := readResp(t, br)
 	if r.OK || r.Code != "not_implemented" {
 		t.Errorf("expected not_implemented; got %+v", r)
+	}
+}
+
+func TestSuspendResumeDispatch(t *testing.T) {
+	h := &fakeHandler{}
+	sock, stop := startServer(t, h)
+	defer stop()
+	conn := dial(t, sock)
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+
+	sendLine(t, conn, `{"cmd":"suspend"}`)
+	if r := readResp(t, br); !r.OK {
+		t.Errorf("suspend: expected ok, got %+v", r)
+	}
+	if !h.suspendFired.Load() {
+		t.Error("suspend did not reach handler")
+	}
+
+	sendLine(t, conn, `{"cmd":"resume"}`)
+	if r := readResp(t, br); !r.OK {
+		t.Errorf("resume: expected ok, got %+v", r)
+	}
+	if !h.resumeFired.Load() {
+		t.Error("resume did not reach handler")
+	}
+}
+
+func TestSuspendUnavailable(t *testing.T) {
+	h := &fakeHandler{suspendErr: ErrUnavailable}
+	sock, stop := startServer(t, h)
+	defer stop()
+	conn := dial(t, sock)
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+
+	sendLine(t, conn, `{"cmd":"suspend"}`)
+	r := readResp(t, br)
+	if r.OK || r.Code != "unavailable" {
+		t.Errorf("expected code=unavailable when feature off; got %+v", r)
 	}
 }
 

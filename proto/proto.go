@@ -48,6 +48,10 @@ type StatusInfo struct {
 	SessionOpen bool       `json:"session_open"`
 	Audio       AudioStats `json:"audio,omitzero"`
 	ASR         ASRStats   `json:"asr,omitzero"`
+	// AutoActivation reports the unmute-to-dictate watcher state:
+	// "active", "suspended (manual)", or "suspended (flapping)". Empty
+	// (omitted) when the feature is not enabled.
+	AutoActivation string `json:"auto_activation,omitempty"`
 }
 
 // AudioStats reports observability counters for the capture pipeline.

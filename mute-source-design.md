@@ -565,3 +565,73 @@ All resolved as of 2026-05-14:
    wins; absent that, system default capture device. Same rule for
    dictad's `--audio-device`. Two-mic pattern (§1.1) is the
    motivating case.
+
+## 12. Suspend / resume and the flap guard (implemented 2026-06-29)
+
+Real-world failure that motivated this section: the system default
+input was switched to a noise-gated headset (SteelSeries Arctis) for an
+audio call while `--unmute-to-dictate` was on with `--audio-device`
+empty. Capture followed the default, and the headset's gate emits
+literal-zero PCM below its threshold and nonzero above it. Keypresses
+and room noise kept crossing the gate, so `pcm-zero` reported
+muted↔unmuted flapping, the watcher fired `EnsureTypeOpen` /
+`CloseIfTypeOpen` on every edge, and the session-open/close mic-cue
+tones looped (beep-on / beep-off) until the daemon was killed. The
+1 s debounce did not help because the gate held each state longer than
+a second.
+
+Two controls were added on `cmd/dictad/mutewatch.go`'s `muteWatcher`:
+
+### 12.1 Manual suspend / resume
+
+`muteWatcher.Suspend(reason)` / `Resume()` / `Suspended()`, reachable
+over the control socket as the `suspend` / `resume` commands and the
+`dicta suspend` / `dicta resume` CLI subcommands. While suspended the
+watcher keeps consuming events and tracks `lastState`, but never fires
+— so `Resume` does not synthesize a stale transition for a mute action
+taken during suspension. When the feature is off (`watcher == nil`) the
+daemon returns the new `control.ErrUnavailable` (`code="unavailable"`),
+not `not_implemented` — the command exists, the feature just isn't on.
+`dicta status` surfaces the state via `StatusInfo.AutoActivation`
+(`active` / `suspended (manual)` / `suspended (flapping)`; omitted when
+the feature is off).
+
+The naming deliberately avoids "pause" — that collides with the Pause
+key that toggles type-mode. D17 governs the bindings dicta *ships*; the
+user is free to bind `dicta suspend` to a key themselves.
+
+### 12.2 Flap auto-suspend
+
+If more than `--unmute-flap-threshold` transitions fire within
+`--unmute-flap-window` (defaults 6 / 10 s, both configurable;
+threshold `<= 0` disables the guard), the watcher self-suspends with
+reason `flapping`, emits exactly one `notify-send` (via the exported
+`dispatch.DefaultNotify`) pointing the user at `dicta resume`, and logs
+a WARN. Worst case the user gets ~`threshold` beeps before it latches
+off, versus an unbounded loop. The guard counts *fired* (post-debounce)
+transitions, so ordinary use never trips it.
+
+Pinning `--audio-device` to the intended mic (the §1.1 two-mic pattern)
+prevents the underlying device-substitution entirely; the flap guard is
+defense-in-depth for the case where pinning is absent or the pinned
+device is gone and capture fell back to the default.
+
+### 12.3 Future enhancement — double-tap-mute gesture (not implemented)
+
+A hardware gesture on the mute button itself was considered: e.g.
+"hold the mute toggle for 3 s" to suspend/resume. It does **not** map
+onto the AC-44 + `pcm-zero` model: the touch-mute is a *toggle*, so a
+hold produces no distinct PCM signature (the stream is only ever zeros
+or nonzero), and "sustained muted" can't mean suspend because muted is
+the resting state whenever the user isn't dictating.
+
+The one gesture `pcm-zero` *can* observe is a **double-tap** — two
+quick muted/unmuted edges within a short window — which the watcher
+could read as suspend/resume without any evdev or compositor
+dependency. The cost is latency: to disambiguate a double-tap from a
+normal single mute action, the single-tap path would have to wait out
+the double-tap window before acting, delaying every session open. Given
+§12.1 (manual command, bindable to a key) and §12.2 (auto-suspend)
+already cover the need, this is deferred unless those prove
+insufficient in practice. If revisited, gate it behind its own flag so
+the single-tap latency is opt-in.

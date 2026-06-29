@@ -170,6 +170,10 @@ func (s *Server) dispatch(ctx context.Context, cmd Command, push EventPush) (Res
 		return Response{OK: true, Data: mics}, false
 	case "mic_select":
 		return wrapErr(s.handler.MicSelect(ctx, cmd.Name, cmd.Reset)), false
+	case "suspend":
+		return wrapErr(s.handler.Suspend(ctx)), false
+	case "resume":
+		return wrapErr(s.handler.Resume(ctx)), false
 	case "subscribe":
 		if err := s.handler.Subscribe(ctx, cmd.Events, push); err != nil {
 			return errResp(err), false
@@ -194,6 +198,9 @@ func wrapErr(err error) Response {
 func errResp(err error) Response {
 	if errors.Is(err, ErrNotImplemented) {
 		return Response{OK: false, Error: err.Error(), Code: "not_implemented"}
+	}
+	if errors.Is(err, ErrUnavailable) {
+		return Response{OK: false, Error: err.Error(), Code: "unavailable"}
 	}
 	return Response{OK: false, Error: err.Error(), Code: "error"}
 }

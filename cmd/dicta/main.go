@@ -49,6 +49,8 @@ func run(args []string, stdout, stderr *os.File) int {
 		fmt.Fprintf(stderr, "  toggle_talk --mode type|clip toggle a dictation session\n")
 		fmt.Fprintf(stderr, "  commit --text \"...\"          commit clip-mode buffer to clipboard\n")
 		fmt.Fprintf(stderr, "  cancel                       cancel an open clip-mode session\n")
+		fmt.Fprintf(stderr, "  suspend                      pause unmute-to-dictate auto-activation\n")
+		fmt.Fprintf(stderr, "  resume                       re-enable unmute-to-dictate auto-activation\n")
 		fmt.Fprintf(stderr, "  shutdown                     ask the daemon to exit cleanly\n")
 		fmt.Fprintf(stderr, "  probe-mute [opts]            diagnostic: probe which mute.Source works for your mic\n")
 		fmt.Fprintf(stderr, "\nflags:\n")
@@ -83,6 +85,10 @@ func run(args []string, stdout, stderr *os.File) int {
 		return runCommit(socketPath, *timeoutFlag, rest[1:], stdout, stderr)
 	case "cancel":
 		return runCancel(socketPath, *timeoutFlag, stdout, stderr)
+	case "suspend":
+		return sendAndPrint(socketPath, control.Command{Cmd: "suspend"}, *timeoutFlag, stdout, stderr)
+	case "resume":
+		return sendAndPrint(socketPath, control.Command{Cmd: "resume"}, *timeoutFlag, stdout, stderr)
 	case "shutdown":
 		return runShutdown(socketPath, *timeoutFlag, stdout, stderr)
 	case "probe-mute":

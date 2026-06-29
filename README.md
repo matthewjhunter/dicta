@@ -154,6 +154,12 @@ dictad` so the daemon auto-launches on first press. Re-run with
 `--uninstall` to remove. For Sway/Hyprland/KDE, bind in the compositor
 config (see [CONFIGURATION.md](CONFIGURATION.md)).
 
+If you run `--unmute-to-dictate`, `dicta suspend` / `dicta resume` pause
+and re-enable auto-activation without killing the daemon -- handy before
+an audio call. Bind `dicta suspend` to a key if you want a one-keystroke
+off-switch. See [CONFIGURATION.md](CONFIGURATION.md) for the flap guard
+that auto-suspends a misbehaving (noise-gated) mic.
+
 ## Heads-up: ydotoold needs a tweak for type-mode
 
 Type-mode drives `ydotool`, which talks to a long-running `ydotoold`

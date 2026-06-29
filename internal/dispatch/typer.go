@@ -108,7 +108,7 @@ func (c TyperConfig) withDefaults() TyperConfig {
 		c.BreakerCooldown = 30 * time.Second
 	}
 	if c.Notify == nil {
-		c.Notify = defaultNotify
+		c.Notify = DefaultNotify
 	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
@@ -116,10 +116,12 @@ func (c TyperConfig) withDefaults() TyperConfig {
 	return c
 }
 
-// defaultNotify shells out to notify-send as a best-effort desktop
+// DefaultNotify shells out to notify-send as a best-effort desktop
 // notification. argv is fixed (no user input), so a PATH lookup is acceptable
 // here; failures are swallowed -- a missing notifier must not affect dispatch.
-func defaultNotify(title, body string) {
+// Exported so other daemon subsystems (e.g. the unmute-to-dictate flap
+// guard) can surface one-shot desktop notices through the same path.
+func DefaultNotify(title, body string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = exec.CommandContext(ctx, "notify-send", title, body).Run()

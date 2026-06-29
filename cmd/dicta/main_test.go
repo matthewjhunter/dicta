@@ -31,6 +31,8 @@ type recordingHandler struct {
 	toggleCalls   []string
 	commitCalls   []string
 	cancelCalls   int
+	suspendCalls  int
+	resumeCalls   int
 	shutdownCalls int
 
 	statusInfo control.StatusInfo
@@ -70,6 +72,18 @@ func (h *recordingHandler) MicList(_ context.Context) ([]control.MicInfo, error)
 }
 func (h *recordingHandler) MicSelect(_ context.Context, _ string, _ bool) error {
 	return control.ErrNotImplemented
+}
+func (h *recordingHandler) Suspend(_ context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.suspendCalls++
+	return nil
+}
+func (h *recordingHandler) Resume(_ context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.resumeCalls++
+	return nil
 }
 func (h *recordingHandler) Subscribe(_ context.Context, _ []string, _ control.EventPush) error {
 	return control.ErrNotImplemented
@@ -186,6 +200,25 @@ func TestToggleTalk_ClipMode(t *testing.T) {
 	}
 	if len(h.toggleCalls) != 1 || h.toggleCalls[0] != "clip" {
 		t.Errorf("toggle calls: got %v want [clip]", h.toggleCalls)
+	}
+}
+
+func TestSuspendResume_RouteToHandler(t *testing.T) {
+	h := &recordingHandler{}
+	sock := startServer(t, h)
+
+	if code, _, stderr := runCLI(t, sock, "suspend"); code != 0 {
+		t.Fatalf("suspend exit code: %d (stderr=%q)", code, stderr)
+	}
+	if h.suspendCalls != 1 {
+		t.Errorf("suspend calls: got %d want 1", h.suspendCalls)
+	}
+
+	if code, _, stderr := runCLI(t, sock, "resume"); code != 0 {
+		t.Fatalf("resume exit code: %d (stderr=%q)", code, stderr)
+	}
+	if h.resumeCalls != 1 {
+		t.Errorf("resume calls: got %d want 1", h.resumeCalls)
 	}
 }
 
