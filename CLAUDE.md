@@ -4,9 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-**Pre-implementation.** The repo contains only `dicta-design.md` (v0.2 design) and this file. No Go module, no code, no tests, no build system, no git history yet. Read the design document end-to-end before making any code changes — it is the single source of truth and most of its decisions are locked.
+**Implemented and running.** The daemon (`cmd/dictad`), CLI (`cmd/dicta`), and clip-mode panel (`cmd/dicta-preview`) all exist, with a Go module (`go.mod`), a full test suite, a `Taskfile.yml`, GitHub Actions CI, and systemd packaging under `packaging/`. `dicta-design.md` (v0.2) remains the authoritative design and most of its decisions are locked — read the relevant section before changing behavior — but it describes the target, not a greenfield. The `--unmute-to-dictate` mute-detection subsystem has its own design doc, `mute-source-design.md` (decision **D18**), which the main design doc's D-list does not cover; read it before touching anything under `internal/mute`.
 
-There are no build, test, or lint commands yet. When implementation begins, follow the phased order in §12 of the design doc; do not skip ahead.
+### Build / test / lint
+
+Driven by `Taskfile.yml` (run `task` to list targets):
+
+- `task build` — build `dictad` + `dicta` (pure Go, static). `task build:all` adds `dicta-preview` (needs CGo + Wayland/GLES dev headers).
+- `task test` — unit tests; `task test:race` adds the race detector (needs CGo). Or `go test ./...` directly.
+- `task vet` / `task lint` (golangci-lint) / `task fmt` / `task vuln` (govulncheck).
+- `task check` — the full CI gate (vet, fmt, lint, test, test:race, vuln). Run before pushing.
+- `task install:user` installs all three binaries into `~/.local/bin`; `task restart` restarts the `dictad` user service to pick up a new build.
 
 ## What dicta is
 
@@ -16,6 +24,8 @@ A Linux/Wayland-first voice dictation daemon written in pure Go. Two activation 
 - **Scroll Lock** → toggles the **clip-mode panel** (`dicta-preview` sidecar GUI). Live transcript appears in an editable text area; **Enter** in the panel commits to the Wayland clipboard via `wl-copy`, **Shift+Enter** inserts a literal newline, **Esc** cancels.
 
 ASR is pluggable: Wyoming (TCP, default), `whisper.cpp` (supervised subprocess), OpenAI-protocol HTTP. LLM cleanup runs on clip-mode text only (mechanical prompt, user-edits-after). Wakeword and PTT are **not v1** — do not implement either.
+
+There is also a **third, optional, default-off activation path**: `--unmute-to-dictate` (D18, `mute-source-design.md`). When enabled, the daemon watches the configured mic's mute state and opens/closes a type-mode session on unmute/mute — the mic's hardware mute button becomes the toggle. This does **not** contradict D5/D17: those govern the compositor *bindings dicta ships*; the unmute path is an opt-in feature gated behind a flag, off by default, with its own security rationale (§3 of the mute doc). It is always-listening when on, by design — do not "fix" idle capture as a bug.
 
 ## Locked decisions that constrain implementation
 
@@ -44,11 +54,17 @@ internal/dispatch    ydotool + wl-copy + notify-send wrappers (no policy)
 internal/control     Unix socket server: command channel + event subscriptions
 internal/config      typed TOML config loading
 internal/audit       JSONL + WAV writer
+internal/mute        pluggable mute.Source for --unmute-to-dictate (D18);
+                     pcmzero/ + pipewire/ subpackages are the two backends
 ```
 
 `internal/log` and `internal/errors` are cross-cutting and may be imported anywhere.
 
-`cmd/dicta-preview/` is a sibling binary that connects to the daemon **only** via the control socket. It MUST NOT import any `internal/` package — the socket protocol (§5.6) is its sole API.
+The unmute-to-dictate **watcher** (debounce, clip-mode safety, fire-on-transition) lives in `cmd/dictad/mutewatch.go`, not in `internal/mute` — `internal/mute` only *observes* state; the watcher *acts* on it, alongside the mode state machine in `cmd/dictad`.
+
+`proto/` is a public package holding the control-protocol wire types (`Command`, `Response`, `Event`, status/event payloads). It is split out from `internal/control` (which type-aliases it) precisely so `cmd/dicta-preview/` can deserialize daemon events without importing `internal/`.
+
+`cmd/dicta-preview/` is a sibling binary that connects to the daemon **only** via the control socket (using `proto/`). It MUST NOT import any `internal/` package — the socket protocol (§5.6) is its sole API.
 
 ## Process topology
 
@@ -64,13 +80,13 @@ Newline-delimited JSON. Two channel modes per connection:
 - **Command channel** (default): one command per line, one response per line.
 - **Event channel** (after `{"cmd":"subscribe", "events":[...]}`): connection locks to event-stream mode; daemon pushes JSON events; further commands rejected.
 
-v1 commands: `toggle_talk` (mode=type|clip), `commit` (carries panel-edited text), `cancel`, `subscribe`, `status`, `shutdown`. v1 events: `transcript`, `session_state`. `wake_*` reserved for v2 → `not_implemented`. Max line length 64 KiB.
+Commands: `status`, `toggle_talk` (mode=type|clip), `commit` (carries panel-edited text), `cancel`, `mic_list`, `mic_select`, `subscribe`, `shutdown`. Events: `transcript`, `session_state`. `wake_*` reserved for v2 → `not_implemented`. Max line length 64 KiB. Wire types live in `proto/`; add a new command by extending the daemon-side `control.Handler` interface and the server's dispatch switch.
 
 `commit.text` is authoritative — the daemon uses the panel's edited text verbatim for `wl-copy`, not its own raw transcript buffer.
 
 ## Security posture worth re-reading before risky changes
 
-§8 of the design doc is load-bearing. Particular landmines:
+§8 of the design doc governs the security posture; treat it as authoritative. Particular landmines:
 - **Subprocess argv lists are built from typed config values, never via shell.** Path values must be validated against an allowlist of prefixes.
 - **TLS verification defaults on** for all HTTP clients (LLM cleanup, OpenAI ASR). `tls_verify = false` is a testing-only knob and must emit a startup WARN.
 - **The mechanical LLM cleanup system prompt is a code constant** and must not be runtime-templated by user input.
@@ -78,21 +94,16 @@ v1 commands: `toggle_talk` (mode=type|clip), `commit` (carries panel-edited text
 - **`MemoryDenyWriteExecute=true`** in the systemd unit relies on D13 — anything that breaks the daemon's pure-Go property also breaks the hardening.
 - **`dicta-preview` runs as an unprivileged user GUI process** without the daemon's hardening; its toolkit deps are NOT subject to D13. Keep the panel's logic minimal — it's a transcript display + edit buffer + three keystrokes, not a place to add features.
 
-## VAD calibration is load-bearing
+## VAD calibration is critical to type-mode
 
 Type-mode commits depend on `internal/audio`'s energy VAD firing correctly. The §5.1 spec (500 ms calibration, 6 dB margin, 800 ms hangover) is the starting point but will need real-world tuning. CI must include calibration regression tests against canned WAV fixtures (clean, noisy office, music background). A flaky VAD means premature commits or never-commits — both are user-facing failures.
 
-## Implementation order
+## asrclient dependency
 
-Follow §12 of the design doc. Two ordering invariants matter:
-
-- Phase 2 (bootstrap `asrclient` with the Wyoming wire protocol + Transcriber impl) ships **before** any ASR work in dicta so the default backend has a working transport from day one. asrclient lives at `~/git/matthewjhunter/asrclient`; dicta imports it via go.mod.
-- Phase 8 (control-socket event subscription) ships **before** phase 9 (`dicta-preview`) so the panel has live transcripts to display.
-
-Don't reorder phases without updating the design doc first.
+The `Transcriber` interface and the three protocol clients (Wyoming, whispercpp, openai) live in `github.com/matthewjhunter/asrclient` (sibling repo at `~/git/matthewjhunter/asrclient`), consumed via `go.mod` (D16). dicta adds only the thin `internal/asr` selector and the `internal/whispersup` lifecycle supervisor on top. Changes to the wire protocols or the `Transcriber` shape belong in that repo, not here.
 
 ## When in doubt
 
-- Re-read the relevant section of `dicta-design.md` rather than guessing.
+- Re-read the relevant section of `dicta-design.md` (or `mute-source-design.md` for anything mute-related) rather than guessing.
 - "Open decision points" in §13 are explicitly deferred — flag them and ask before resolving. v0.2 has one: notification icon names.
 - Anything in §14 ("Out of scope (v1)") stays out of v1 — including PTT and wakeword.
