@@ -203,6 +203,25 @@ func TestToggleTalk_ClipMode(t *testing.T) {
 	}
 }
 
+func TestSuspendResume_RouteToHandler(t *testing.T) {
+	h := &recordingHandler{}
+	sock := startServer(t, h)
+
+	if code, _, stderr := runCLI(t, sock, "suspend"); code != 0 {
+		t.Fatalf("suspend exit code: %d (stderr=%q)", code, stderr)
+	}
+	if h.suspendCalls != 1 {
+		t.Errorf("suspend calls: got %d want 1", h.suspendCalls)
+	}
+
+	if code, _, stderr := runCLI(t, sock, "resume"); code != 0 {
+		t.Fatalf("resume exit code: %d (stderr=%q)", code, stderr)
+	}
+	if h.resumeCalls != 1 {
+		t.Errorf("resume calls: got %d want 1", h.resumeCalls)
+	}
+}
+
 func TestToggleTalk_RejectsMissingMode(t *testing.T) {
 	h := &recordingHandler{}
 	sock := startServer(t, h)
