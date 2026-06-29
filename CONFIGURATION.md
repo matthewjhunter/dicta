@@ -115,6 +115,30 @@ by side for 15 seconds and reports what fired.
 | `--unmute-to-dictate` | `false` | Enable the watcher. The Pause key remains active in parallel — both activation paths route to the same session state machine. When the configured mic transitions muted→unmuted, the daemon opens type-mode as if you'd pressed Pause; on unmuted→muted it closes a type-mode session. Clip-mode sessions are never disturbed by the watcher — an explicit Scroll Lock gesture always wins. |
 | `--unmute-source` | `auto` | Detection backend: `auto` (race pcm-zero+pipewire, first transition wins, then lock in), `pcm-zero` (force PCM zero detection; needs `--audio-monitor`), or `pipewire` (force wpctl polling). |
 | `--unmute-to-dictate-debounce` | `1s` | Minimum duration a transition must persist before firing. Suppresses single-source glitches. |
+| `--unmute-flap-window` | `10s` | Sliding window for the flap guard (below). |
+| `--unmute-flap-threshold` | `6` | Transitions within the window before the watcher auto-suspends itself. `0` disables the guard. |
+
+### Suspending the watcher
+
+Two ways to stop auto-activation without killing the daemon:
+
+- **Manual** — `dicta suspend` pauses the watcher; `dicta resume`
+  re-enables it. While suspended the daemon still tracks mute state but
+  never opens/closes a session, so resuming does not replay a transition
+  you made while it was off. The Pause and Scroll Lock keys keep working.
+  Bind `dicta suspend` to a compositor key for a one-keystroke off-switch
+  before an audio call. `dicta status` shows the current state in
+  `auto_activation` (`active` / `suspended (manual)` / `suspended
+  (flapping)`).
+- **Automatic flap guard** — if more than `--unmute-flap-threshold`
+  transitions fire within `--unmute-flap-window`, the watcher
+  auto-suspends with reason `flapping`, emits one `notify-send`, and
+  stops. This catches a noise-gated device that was switched in as the
+  system default (e.g. a gaming headset whose gate crosses zero on every
+  keypress): `pcm-zero` reads the gate as muted↔unmuted flapping, which
+  would otherwise loop the mic-cue beep indefinitely. Pin the mic with
+  `--audio-device` to avoid this entirely; run `dicta resume` to clear a
+  flap suspend.
 
 The Pause key remains active in parallel — both activation paths route
 to the same session state machine, so you can still toggle manually.
