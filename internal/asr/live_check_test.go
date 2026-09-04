@@ -1,7 +1,6 @@
 package asr
 
 import (
-	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -30,17 +29,12 @@ func TestCheck_LiveBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Select: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = backend.Close()
-		// backend.Close() is a no-op for this client: asrclient's
-		// openai.NewClient builds &http.Client{Timeout: ...} without
-		// setting Transport, so Close's `Transport.(*http.Transport)`
-		// assertion fails on the nil interface and CloseIdleConnections
-		// is never reached. The client therefore uses (and pools on)
-		// http.DefaultTransport. Released here so the package's goleak
-		// check stays strict; the fix belongs in asrclient.
-		http.DefaultTransport.(*http.Transport).CloseIdleConnections()
-	})
+	// Close is enough as of asrclient v0.1.1: the client owns its
+	// transport, so this releases the pooled connection and the
+	// package's goleak check passes with no help. Against v0.1.0 the
+	// caller had to reach for http.DefaultTransport itself
+	// (asrclient#5).
+	t.Cleanup(func() { _ = backend.Close() })
 
 	got := Check(t.Context(), backend, 60*time.Second)
 	t.Logf("state=%s transcript=%q latency=%s", got.State, got.Transcript, got.Latency)
