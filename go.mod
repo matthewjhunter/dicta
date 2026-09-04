@@ -2,7 +2,7 @@ module github.com/matthewjhunter/dicta
 
 go 1.25.11
 
-require github.com/matthewjhunter/asrclient v0.1.0
+require github.com/matthewjhunter/asrclient v0.1.1
 
 require go.uber.org/goleak v1.3.0
 
