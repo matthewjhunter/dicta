@@ -25,6 +25,10 @@ type (
 	EventPush        = proto.EventPush
 )
 
+// HealthUnchecked is re-exported so daemon code can fill ASRStats
+// without importing proto directly.
+const HealthUnchecked = proto.HealthUnchecked
+
 // Handler is the daemon-side interface the control server calls into.
 // A Handler that returns ErrNotImplemented for a given method causes
 // the server to reply with ok=false, code="not_implemented".

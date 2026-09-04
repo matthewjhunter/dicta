@@ -174,13 +174,10 @@ func main() {
 		}
 		asrMon := newASRMonitor(logger, backend, asrMonitorConfig{
 			BackendName:       *asrBackendFlag,
-			HealthInterval:    10 * time.Second,
 			TranscribeTimeout: *asrTranscribeTimeoutFlag,
 			MaxConcurrent:     *asrMaxConcurrentFlag,
 			DisfluencyRE:      disfluencyRE,
 		})
-		asrMon.Start(ctx)
-		defer asrMon.Stop()
 		defer func() { _ = backend.Close() }()
 		handler.asr = asrMon
 

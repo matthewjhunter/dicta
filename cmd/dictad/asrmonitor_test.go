@@ -12,6 +12,7 @@ import (
 
 	"github.com/matthewjhunter/asrclient"
 	"github.com/matthewjhunter/dicta/internal/asr"
+	"github.com/matthewjhunter/dicta/internal/control"
 )
 
 // fakeASR is a controllable asr.Transcriber for asrMonitor tests.
@@ -73,7 +74,6 @@ func TestASRMonitor_OnUtteranceTranscribesAndCounts(t *testing.T) {
 	f := &fakeASR{transcript: asrclient.Transcript{Text: "hello"}}
 	m := newASRMonitor(discardLogger(), f, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
@@ -98,8 +98,7 @@ func TestASRMonitor_OnUtteranceTranscribesAndCounts(t *testing.T) {
 func TestASRMonitor_DropsEmptyUtterance(t *testing.T) {
 	f := &fakeASR{}
 	m := newASRMonitor(discardLogger(), f, asrMonitorConfig{
-		BackendName:    "fake",
-		HealthInterval: time.Hour,
+		BackendName: "fake",
 	})
 	m.OnUtterance(nil, nil, nil)
 	m.OnUtterance([]byte{}, nil, nil)
@@ -113,7 +112,6 @@ func TestASRMonitor_RecordsTranscribeError(t *testing.T) {
 	f := &fakeASR{transcribeErr: errors.New("boom")}
 	m := newASRMonitor(discardLogger(), f, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     1,
 	})
@@ -138,7 +136,6 @@ func TestASRMonitor_DropsAtConcurrencyCap(t *testing.T) {
 	f := &fakeASR{transcribeWait: 100 * time.Millisecond}
 	m := newASRMonitor(discardLogger(), f, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     1,
 	})
@@ -153,61 +150,41 @@ func TestASRMonitor_DropsAtConcurrencyCap(t *testing.T) {
 	}
 }
 
-func TestASRMonitor_HealthLoopMarksPing(t *testing.T) {
+// TestASRMonitor_NeverPings is the point of this change: the monitor
+// must not touch the ASR endpoint on its own, idle or busy. The old
+// health poll issued a Ping every 10 seconds forever, which on a
+// Lemonade backend meant a 405 logged at [Error] every 10 seconds
+// (HEAD against a POST-only transcription endpoint).
+func TestASRMonitor_NeverPings(t *testing.T) {
 	f := &fakeASR{}
 	m := newASRMonitor(discardLogger(), f, asrMonitorConfig{
-		BackendName:    "fake",
-		HealthInterval: 50 * time.Millisecond,
-		HealthTimeout:  100 * time.Millisecond,
+		BackendName:       "fake",
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     1,
 	})
-	m.Start(t.Context())
-	defer m.Stop()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if m.Snapshot().Health == "healthy" {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
+	m.OnUtterance(make([]byte, 1280), nil, nil)
+	time.Sleep(100 * time.Millisecond)
+	m.Snapshot()
+
+	if got := f.healthCall.Load(); got != 0 {
+		t.Errorf("monitor made %d Ping calls, want 0", got)
 	}
+}
+
+// TestASRMonitor_SnapshotReportsUnchecked pins the honesty rule: status
+// must not claim a health it did not establish.
+func TestASRMonitor_SnapshotReportsUnchecked(t *testing.T) {
+	m := newASRMonitor(discardLogger(), &fakeASR{}, asrMonitorConfig{BackendName: "fake"})
+
 	s := m.Snapshot()
-	if s.Health != "healthy" {
-		t.Errorf("Health: got %q want healthy", s.Health)
+	if s.Health != control.HealthUnchecked {
+		t.Errorf("Health: got %q want %q", s.Health, control.HealthUnchecked)
 	}
 	if s.LastHealthErr != "" {
 		t.Errorf("LastHealthErr: got %q want empty", s.LastHealthErr)
 	}
-}
-
-func TestASRMonitor_HealthLoopMarksUnhealthy(t *testing.T) {
-	f := &fakeASR{healthErr: errors.New("connection refused")}
-	m := newASRMonitor(discardLogger(), f, asrMonitorConfig{
-		BackendName:    "fake",
-		HealthInterval: 50 * time.Millisecond,
-		HealthTimeout:  100 * time.Millisecond,
-	})
-	m.Start(t.Context())
-	defer m.Stop()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if m.Snapshot().Health == "unhealthy" {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	s := m.Snapshot()
-	if s.Health != "unhealthy" {
-		t.Errorf("Health: got %q want unhealthy", s.Health)
-	}
-	if s.LastHealthErr != "connection refused" {
-		t.Errorf("LastHealthErr: got %q", s.LastHealthErr)
-	}
-}
-
-func TestASRMonitor_StopBeforeStart(t *testing.T) {
-	m := newASRMonitor(discardLogger(), &fakeASR{}, asrMonitorConfig{BackendName: "fake"})
-	m.Stop() // no-op
 }
 
 func TestASRMonitor_BackendInterface(t *testing.T) {
@@ -241,7 +218,6 @@ func TestASRMonitor_DropsHallucinationPhrase(t *testing.T) {
 			f := &fakeASR{transcript: asrclient.Transcript{Text: tc.text}}
 			m := newASRMonitor(discardLogger(), f, asrMonitorConfig{
 				BackendName:       "fake",
-				HealthInterval:    time.Hour,
 				TranscribeTimeout: time.Second,
 				MaxConcurrent:     1,
 			})
@@ -315,7 +291,6 @@ func TestASRMonitor_DropsRepetitionLoop(t *testing.T) {
 			f := &fakeASR{transcript: asrclient.Transcript{Text: tc.text}}
 			m := newASRMonitor(discardLogger(), f, asrMonitorConfig{
 				BackendName:       "fake",
-				HealthInterval:    time.Hour,
 				TranscribeTimeout: time.Second,
 				MaxConcurrent:     1,
 			})

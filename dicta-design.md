@@ -357,15 +357,54 @@ For `whispercpp`, the daemon prefers an ephemeral port (`port = 0`) discovered
 by spawning `whisper-server` and reading the bound port from its log/stderr,
 or by binding a free port itself and passing it to the server.
 
-Health-check protocol per backend:
-- `wyoming` -- TCP connect plus a periodic `describe` event round-trip.
-- `whispercpp` -- `GET /health` against the supervised server.
-- `openai` -- HEAD probe on the transcription endpoint, or a cached
-  result of the most recent transcription (probes are billable on
-  some providers).
+Health checking is **not** a background poll and **not** a reachability
+ping. Two findings drove that:
 
-A failed health probe transitions the backend to `unhealthy`, which causes
-`Transcribe` to fail fast with a clear error instead of hanging.
+- The polled `health` field gated nothing. It was read by `dicta status`
+  and by nothing else -- neither the utterance path nor `Transcribe`
+  consulted it -- while a failed `Transcribe` already records a more
+  specific error in `last_error`.
+- A reachability ping cannot answer the question that matters.
+  `asrclient`'s HEAD probe counts *any* reply as success, so a Lemonade
+  endpoint returning `405 Method Not Allowed` to every HEAD -- and which
+  would reject every transcription sent to it -- reads as healthy. The
+  poll also logged that 405 at `[Error]` on the server every 10 seconds,
+  8,640 a day, burying the log.
+
+So `dicta status` reports `health: "unchecked"` and does no I/O. Claiming
+health on evidence that weak is worse than declining to answer.
+
+The real check is an explicit command that runs a known utterance
+end-to-end and compares the transcript: `dicta check` submits an
+embedded "Hello world" fixture (16 kHz mono int16, the D15 format, so
+the probe exercises the same shape as live audio) and reports one of
+three states -- `ok` (transcript matched), `degraded` (a transcript came
+back but not the expected one: backend up, model wrong or failing), or
+`unreachable` (error or timeout). That distinguishes cases a ping cannot:
+wrong model loaded, model fails to load, GPU OOM, auth failure, an
+endpoint that accepts the POST and then errors.
+
+Measured on the halo Lemonade backend (`whisper-v3-turbo-FLM`): 5.5s
+cold, 1.9s warm. Hence a command rather than something `status` does --
+seconds of latency and, on a cloud `openai` endpoint, a billable
+transcription are acceptable when a human asked for a diagnostic and not
+when they asked whether a session is open.
+
+The fixture is embedded rather than synthesized at runtime. Generating
+it from a TTS service each check would add a dependency dicta otherwise
+does not have (it is a dictation daemon; it never speaks), roughly
+double the latency, and make a failure ambiguous between the synthesizer
+and the recognizer. It is generated once, offline, and committed.
+
+Comparison is normalized -- lowercased, punctuation stripped, whitespace
+collapsed -- because backends return the phrase decorated: the same
+Whisper model answers `" Hello world."`, leading space and trailing
+period included. On a mismatch the check reports the transcript it got,
+which is a far better diagnostic than a boolean.
+
+The check calls `Transcribe` directly. It must never enter the
+`OnUtterance` path: that path ends at `ydotool`, and a health check must
+not be able to type into the user's focused window (D12).
 
 ### 5.3 `internal/wake` (deferred to v2)
 

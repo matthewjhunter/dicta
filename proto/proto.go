@@ -65,10 +65,21 @@ type AudioStats struct {
 	NoiseFloor    string `json:"noise_floor,omitempty"`
 }
 
-// ASRStats reports backend health and recent transcribe activity.
+// HealthUnchecked is the only value `dicta status` reports for
+// ASRStats.Health. Status deliberately does not probe the backend: a
+// reachability ping cannot tell you whether the backend will actually
+// transcribe (asrclient counts any HTTP reply, 405 included, as a
+// successful ping), and a real end-to-end check costs seconds and a
+// billable transcription. Claiming health on evidence that weak is
+// worse than declining to answer, so status declines and the real
+// check is its own command.
+const HealthUnchecked = "unchecked"
+
+// ASRStats reports recent transcribe activity. Health is always
+// HealthUnchecked here; see that constant.
 type ASRStats struct {
 	Backend        string `json:"backend,omitempty"`
-	Health         string `json:"health,omitempty"` // "healthy" | "unhealthy" | "unknown"
+	Health         string `json:"health,omitempty"`
 	LastHealthErr  string `json:"last_health_error,omitempty"`
 	Transcripts    uint64 `json:"transcripts"`
 	LastTranscript string `json:"last_transcript,omitempty"`
