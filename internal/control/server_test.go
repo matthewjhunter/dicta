@@ -48,8 +48,16 @@ type fakeHandler struct {
 	toggleMode  string
 	micSelName  string
 	micSelReset bool
+
+	checkInfo CheckInfo
+	checkErr  error
 }
 
+func (h *fakeHandler) Check(ctx context.Context) (CheckInfo, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.checkInfo, h.checkErr
+}
 func (h *fakeHandler) Status(ctx context.Context) (StatusInfo, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -548,5 +556,54 @@ func TestNilHandlerRejected(t *testing.T) {
 	sock := filepath.Join(dir, "dicta.sock")
 	if _, err := Listen(sock, nil, nil); err == nil {
 		t.Fatal("expected error for nil handler")
+	}
+}
+
+func TestDispatch_Check(t *testing.T) {
+	h := &fakeHandler{checkInfo: CheckInfo{
+		State:      CheckDegraded,
+		Backend:    "openai",
+		Expected:   "hello world",
+		Transcript: "yellow word",
+		LatencyMs:  1900,
+	}}
+	sock, teardown := startServer(t, h)
+	defer teardown()
+	conn := dial(t, sock)
+	defer func() { _ = conn.Close() }()
+	br := bufio.NewReader(conn)
+
+	sendLine(t, conn, `{"cmd":"check"}`)
+	resp := readResp(t, br)
+	if !resp.OK {
+		t.Fatalf("check: ok=false error=%q", resp.Error)
+	}
+	data, ok := resp.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("check data: got %T want object", resp.Data)
+	}
+	if data["state"] != CheckDegraded {
+		t.Errorf("state: got %v want %q", data["state"], CheckDegraded)
+	}
+	if data["transcript"] != "yellow word" {
+		t.Errorf("transcript: got %v want %q", data["transcript"], "yellow word")
+	}
+}
+
+func TestDispatch_CheckNotImplemented(t *testing.T) {
+	h := &fakeHandler{checkErr: ErrNotImplemented}
+	sock, teardown := startServer(t, h)
+	defer teardown()
+	conn := dial(t, sock)
+	defer func() { _ = conn.Close() }()
+	br := bufio.NewReader(conn)
+
+	sendLine(t, conn, `{"cmd":"check"}`)
+	resp := readResp(t, br)
+	if resp.OK {
+		t.Fatal("check: ok=true, want failure when no ASR backend exists")
+	}
+	if resp.Code != "not_implemented" {
+		t.Errorf("code: got %q want %q", resp.Code, "not_implemented")
 	}
 }

@@ -17,6 +17,7 @@ type (
 	Response         = proto.Response
 	Event            = proto.Event
 	StatusInfo       = proto.StatusInfo
+	CheckInfo        = proto.CheckInfo
 	AudioStats       = proto.AudioStats
 	ASRStats         = proto.ASRStats
 	MicInfo          = proto.MicInfo
@@ -29,11 +30,19 @@ type (
 // without importing proto directly.
 const HealthUnchecked = proto.HealthUnchecked
 
+// Check states, re-exported alongside HealthUnchecked.
+const (
+	CheckOK          = proto.CheckOK
+	CheckDegraded    = proto.CheckDegraded
+	CheckUnreachable = proto.CheckUnreachable
+)
+
 // Handler is the daemon-side interface the control server calls into.
 // A Handler that returns ErrNotImplemented for a given method causes
 // the server to reply with ok=false, code="not_implemented".
 type Handler interface {
 	Status(ctx context.Context) (StatusInfo, error)
+	Check(ctx context.Context) (CheckInfo, error)
 	ToggleTalk(ctx context.Context, mode string) error
 	Commit(ctx context.Context, text string) error
 	Cancel(ctx context.Context) error

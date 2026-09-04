@@ -377,3 +377,54 @@ func TestIsWhisperHallucination_NormalizationEdges(t *testing.T) {
 		}
 	}
 }
+
+// TestASRMonitor_CheckBypassesUtterancePath is the safety property: a
+// diagnostic must never reach the typing path. Check calls Transcribe
+// directly, so the utterance counters stay at zero and no onTranscript
+// callback can fire (D12 -- that path ends at ydotool).
+func TestASRMonitor_CheckBypassesUtterancePath(t *testing.T) {
+	f := &fakeASR{transcript: asrclient.Transcript{Text: " Hello world."}}
+	m := newASRMonitor(discardLogger(), f, asrMonitorConfig{
+		BackendName:       "fake",
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     1,
+	})
+
+	info := m.Check(t.Context())
+
+	if info.State != control.CheckOK {
+		t.Errorf("State: got %q want %q", info.State, control.CheckOK)
+	}
+	if info.Backend != "fake" {
+		t.Errorf("Backend: got %q want %q", info.Backend, "fake")
+	}
+	if got := m.Snapshot().Transcripts; got != 0 {
+		t.Errorf("Transcripts: got %d, want 0 -- a check must not count as dictation", got)
+	}
+	if got := m.Snapshot().LastTranscript; got != "" {
+		t.Errorf("LastTranscript: got %q, want empty -- a check must not look like speech", got)
+	}
+}
+
+// TestASRMonitor_CheckReportsDegraded pins the state that matters: the
+// backend answered, with the wrong words. A reachability ping calls
+// this healthy.
+func TestASRMonitor_CheckReportsDegraded(t *testing.T) {
+	f := &fakeASR{transcript: asrclient.Transcript{Text: "yellow word"}}
+	m := newASRMonitor(discardLogger(), f, asrMonitorConfig{
+		BackendName:       "fake",
+		TranscribeTimeout: time.Second,
+		MaxConcurrent:     1,
+	})
+
+	info := m.Check(t.Context())
+	if info.State != control.CheckDegraded {
+		t.Errorf("State: got %q want %q", info.State, control.CheckDegraded)
+	}
+	if info.Transcript != "yellow word" {
+		t.Errorf("Transcript: got %q want %q", info.Transcript, "yellow word")
+	}
+	if info.Expected != asr.CheckPhrase {
+		t.Errorf("Expected: got %q want %q", info.Expected, asr.CheckPhrase)
+	}
+}

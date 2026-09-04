@@ -156,6 +156,12 @@ func (s *Server) dispatch(ctx context.Context, cmd Command, push EventPush) (Res
 			return errResp(err), false
 		}
 		return Response{OK: true, Data: info}, false
+	case "check":
+		info, err := s.handler.Check(ctx)
+		if err != nil {
+			return errResp(err), false
+		}
+		return Response{OK: true, Data: info}, false
 	case "toggle_talk":
 		return wrapErr(s.handler.ToggleTalk(ctx, cmd.Mode)), false
 	case "commit":

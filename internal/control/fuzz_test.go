@@ -107,6 +107,7 @@ func repeat(s string, n int) string {
 type noopHandler struct{}
 
 func (noopHandler) Status(_ context.Context) (StatusInfo, error)        { return StatusInfo{}, nil }
+func (noopHandler) Check(_ context.Context) (CheckInfo, error)          { return CheckInfo{}, nil }
 func (noopHandler) ToggleTalk(_ context.Context, _ string) error        { return nil }
 func (noopHandler) Commit(_ context.Context, _ string) error            { return nil }
 func (noopHandler) Cancel(_ context.Context) error                      { return nil }

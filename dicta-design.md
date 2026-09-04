@@ -540,8 +540,18 @@ audio_cue_duration_ms = 80
 {"cmd": "mic_list"}                       // enumerate audio sources
 {"cmd": "mic_select", "name": "alsa_input...", "reset": false}
 {"cmd": "status"}
+{"cmd": "check"}                          // end-to-end ASR check (see 5.2)
 {"cmd": "shutdown"}
 ```
+
+`check` returns `data` as a `CheckInfo`: `state` (`ok`, `degraded`, or
+`unreachable`), `backend`, `expected`, `transcript`, `latency_ms`, and
+`error`. It is the only command that deliberately takes seconds, so a
+client must allow more time for it than for `status` -- the `dicta` CLI
+substitutes a 35s timeout, chosen to exceed the daemon's own check
+timeout so the daemon is the one that gives up first and the caller gets
+a `CheckInfo` rather than a socket error. With no ASR backend configured
+it returns `not_implemented` rather than inventing a state.
 
 `commit.text` carries the panel's edited text -- the daemon uses that
 verbatim for `wl-copy` rather than its own internal buffer. The user's
