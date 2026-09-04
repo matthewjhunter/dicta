@@ -45,7 +45,8 @@ func run(args []string, stdout, stderr *os.File) int {
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: dicta [flags] <command> [args...]\n\n")
 		fmt.Fprintf(stderr, "commands:\n")
-		fmt.Fprintf(stderr, "  status                       show daemon status\n")
+		fmt.Fprintf(stderr, "  status                       show daemon status (instant; does not check the ASR backend)\n")
+		fmt.Fprintf(stderr, "  check                        run a known utterance end-to-end through ASR and compare it\n")
 		fmt.Fprintf(stderr, "  toggle_talk --mode type|clip toggle a dictation session\n")
 		fmt.Fprintf(stderr, "  commit --text \"...\"          commit clip-mode buffer to clipboard\n")
 		fmt.Fprintf(stderr, "  cancel                       cancel an open clip-mode session\n")
@@ -59,6 +60,16 @@ func run(args []string, stdout, stderr *os.File) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+
+	// Whether --timeout was given explicitly. `check` needs far longer
+	// than the 2s default and substitutes its own, but must not
+	// override a timeout the user asked for.
+	timeoutSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "timeout" {
+			timeoutSet = true
+		}
+	})
 
 	rest := fs.Args()
 	if len(rest) == 0 {
@@ -79,6 +90,8 @@ func run(args []string, stdout, stderr *os.File) int {
 	switch rest[0] {
 	case "status":
 		return runStatus(socketPath, *timeoutFlag, stdout, stderr)
+	case "check":
+		return runCheck(socketPath, *timeoutFlag, timeoutSet, stdout, stderr)
 	case "toggle_talk":
 		return runToggle(socketPath, *timeoutFlag, rest[1:], stdout, stderr)
 	case "commit":
@@ -102,6 +115,19 @@ func run(args []string, stdout, stderr *os.File) int {
 
 func runStatus(socketPath string, timeout time.Duration, stdout, stderr *os.File) int {
 	return sendAndPrint(socketPath, control.Command{Cmd: "status"}, timeout, stdout, stderr)
+}
+
+// checkClientTimeout exceeds the daemon's own asr.DefaultCheckTimeout
+// so the daemon is the one that gives up first. If the client timed out
+// first the user would get a socket error instead of the useful
+// "unreachable, after N ms" payload the daemon would have sent.
+const checkClientTimeout = 35 * time.Second
+
+func runCheck(socketPath string, timeout time.Duration, timeoutSet bool, stdout, stderr *os.File) int {
+	if !timeoutSet {
+		timeout = checkClientTimeout
+	}
+	return sendAndPrint(socketPath, control.Command{Cmd: "check"}, timeout, stdout, stderr)
 }
 
 func runToggle(socketPath string, timeout time.Duration, args []string, stdout, stderr *os.File) int {

@@ -37,6 +37,16 @@ type recordingHandler struct {
 
 	statusInfo control.StatusInfo
 	cancelErr  error
+
+	checkCalls int
+	checkInfo  control.CheckInfo
+}
+
+func (h *recordingHandler) Check(_ context.Context) (control.CheckInfo, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.checkCalls++
+	return h.checkInfo, nil
 }
 
 func (h *recordingHandler) Status(_ context.Context) (control.StatusInfo, error) {

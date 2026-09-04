@@ -75,6 +75,11 @@ type asrMonitorConfig struct {
 	TranscribeTimeout time.Duration
 	MaxConcurrent     int
 
+	// CheckTimeout bounds one `dicta check`. Zero takes
+	// asr.DefaultCheckTimeout. It is generous on purpose: a check is
+	// allowed to be slow because a human asked for it.
+	CheckTimeout time.Duration
+
 	// DisfluencyRE, when non-nil, is applied to every successful
 	// transcript before hallucination/repetition filters run. nil
 	// disables word-level stripping; trailing-ellipsis trim still
@@ -296,6 +301,28 @@ func isWhisperRepetitionLoop(text string) bool {
 		}
 	}
 	return false
+}
+
+// Check runs one end-to-end check: submit the embedded fixture to the
+// backend and compare the transcript. It is the real answer to "does
+// dictation work", as opposed to the reachability ping status used to
+// report. It bypasses OnUtterance entirely, so nothing it does can
+// reach the typing path (D12).
+func (m *asrMonitor) Check(ctx context.Context) control.CheckInfo {
+	r := asr.Check(ctx, m.backend, m.cfg.CheckTimeout)
+	m.logger.Info("asr.check",
+		"state", r.State,
+		"backend", m.cfg.BackendName,
+		"transcript", r.Transcript,
+		"latency_ms", r.Latency.Milliseconds())
+	return control.CheckInfo{
+		State:      r.State,
+		Backend:    m.cfg.BackendName,
+		Expected:   r.Expected,
+		Transcript: r.Transcript,
+		LatencyMs:  r.Latency.Milliseconds(),
+		Error:      r.Err,
+	}
 }
 
 // Snapshot returns the current ASRStats for inclusion in a status

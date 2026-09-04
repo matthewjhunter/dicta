@@ -50,6 +50,16 @@ func (h *stubHandler) Status(ctx context.Context) (control.StatusInfo, error) {
 	return info, nil
 }
 
+// Check runs the ASR end-to-end check. Without an ASR backend there is
+// nothing to check, so it reports not_implemented rather than claiming
+// a state.
+func (h *stubHandler) Check(ctx context.Context) (control.CheckInfo, error) {
+	if h.asr == nil {
+		return control.CheckInfo{}, control.ErrNotImplemented
+	}
+	return h.asr.Check(ctx), nil
+}
+
 func (h *stubHandler) ToggleTalk(ctx context.Context, mode string) error {
 	if h.session == nil {
 		return control.ErrNotImplemented

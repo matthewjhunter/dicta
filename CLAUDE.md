@@ -47,7 +47,8 @@ The packages below must NOT import each other. The mode state machine (open/clos
 
 ```
 internal/audio       capture, VAD, ringbuffer, mic-cue tones, IsQuiet
-internal/asr         thin selector returning an asrclient.Transcriber per [asr] config
+internal/asr         thin selector returning an asrclient.Transcriber per [asr] config;
+                     also owns the `dicta check` fixture + comparison (check.go)
 internal/whispersup  whisper-server subprocess supervisor (whispercpp backend only)
 internal/cleanup     LLM cleanup client (OpenAI-protocol)
 internal/dispatch    ydotool + wl-copy + notify-send wrappers (no policy)
@@ -80,7 +81,7 @@ Newline-delimited JSON. Two channel modes per connection:
 - **Command channel** (default): one command per line, one response per line.
 - **Event channel** (after `{"cmd":"subscribe", "events":[...]}`): connection locks to event-stream mode; daemon pushes JSON events; further commands rejected.
 
-Commands: `status`, `toggle_talk` (mode=type|clip), `commit` (carries panel-edited text), `cancel`, `mic_list`, `mic_select`, `subscribe`, `shutdown`. Events: `transcript`, `session_state`. `wake_*` reserved for v2 → `not_implemented`. Max line length 64 KiB. Wire types live in `proto/`; add a new command by extending the daemon-side `control.Handler` interface and the server's dispatch switch.
+Commands: `status`, `check` (end-to-end ASR check -- submits an embedded "Hello world" fixture and compares the transcript; seconds, not milliseconds), `toggle_talk` (mode=type|clip), `commit` (carries panel-edited text), `cancel`, `mic_list`, `mic_select`, `subscribe`, `shutdown`. Events: `transcript`, `session_state`. `wake_*` reserved for v2 → `not_implemented`. Max line length 64 KiB. Wire types live in `proto/`; add a new command by extending the daemon-side `control.Handler` interface and the server's dispatch switch.
 
 `commit.text` is authoritative — the daemon uses the panel's edited text verbatim for `wl-copy`, not its own raw transcript buffer.
 

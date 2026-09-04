@@ -86,6 +86,30 @@ type ASRStats struct {
 	LastError      string `json:"last_error,omitempty"`
 }
 
+// CheckStates reported by the "check" command. See CheckInfo.
+const (
+	CheckOK          = "ok"
+	CheckDegraded    = "degraded"
+	CheckUnreachable = "unreachable"
+)
+
+// CheckInfo is the payload of a successful "check" response: the
+// result of running a known utterance end-to-end through the ASR
+// backend and comparing the transcript.
+//
+// State is CheckOK, CheckDegraded (a transcript came back but not the
+// expected one -- backend up, model wrong or failing) or
+// CheckUnreachable. Degraded is the state a reachability ping cannot
+// distinguish from healthy, and the reason this command exists.
+type CheckInfo struct {
+	State      string `json:"state"`
+	Backend    string `json:"backend,omitempty"`
+	Expected   string `json:"expected"`
+	Transcript string `json:"transcript,omitempty"`
+	LatencyMs  int64  `json:"latency_ms"`
+	Error      string `json:"error,omitempty"`
+}
+
 // TranscriptData is the payload of a "transcript" event. v1 only emits
 // final transcripts (Final = true); the field is fixed in the wire
 // schema so a future streaming backend can flip it without a protocol
