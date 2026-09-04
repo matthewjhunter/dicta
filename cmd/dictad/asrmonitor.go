@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -15,27 +14,31 @@ import (
 	"github.com/matthewjhunter/dicta/internal/control"
 )
 
-// asrMonitor wraps an asr.Transcriber with health polling and lightweight
-// transcribe-and-log activity. As of phase 10 the monitor no longer
-// publishes events directly: the session orchestrator owns the
-// transcript publish path because only it knows the mode (and whether
-// to apply LLM cleanup before publishing).
+// asrMonitor wraps an asr.Transcriber with lightweight
+// transcribe-and-log activity and an on-demand health probe. As of
+// phase 10 the monitor no longer publishes events directly: the
+// session orchestrator owns the transcript publish path because only
+// it knows the mode (and whether to apply LLM cleanup before
+// publishing).
+//
+// The monitor does not probe backend health at all. It used to poll
+// Ping every 10s for the life of the daemon to maintain a field that
+// gates nothing -- health was read only by `dicta status`, never by
+// OnUtterance or transcribe -- and the probe could not answer the
+// question anyway: asrclient pings by issuing HEAD at the
+// transcription endpoint and counts any reply as success, so an
+// endpoint that rejects every transcription it is sent still reads
+// healthy. Status now reports "unchecked" rather than a number it
+// cannot stand behind; a real end-to-end check is its own command.
 type asrMonitor struct {
 	backend asr.Transcriber
 	logger  *slog.Logger
 	cfg     asrMonitorConfig
 
-	// stats — atomics so Snapshot is lock-free.
+	// stats — atomics so the transcribe path never blocks Snapshot.
 	transcripts    atomic.Uint64
 	lastTranscript atomic.Value // string
 	lastError      atomic.Value // string
-	health         atomic.Value // string ("healthy" | "unhealthy" | "unknown")
-	lastHealthErr  atomic.Value // string
-
-	mu       sync.Mutex
-	stop     context.CancelFunc
-	doneOnce sync.Once
-	doneCh   chan struct{}
 
 	// inflight bounds concurrent Transcribe calls so a backend hang
 	// can't pile up goroutines.
@@ -69,8 +72,6 @@ type transcriptResult struct {
 
 type asrMonitorConfig struct {
 	BackendName       string
-	HealthInterval    time.Duration
-	HealthTimeout     time.Duration
 	TranscribeTimeout time.Duration
 	MaxConcurrent     int
 
@@ -82,12 +83,6 @@ type asrMonitorConfig struct {
 }
 
 func (c asrMonitorConfig) withDefaults() asrMonitorConfig {
-	if c.HealthInterval == 0 {
-		c.HealthInterval = 10 * time.Second
-	}
-	if c.HealthTimeout == 0 {
-		c.HealthTimeout = 5 * time.Second
-	}
 	if c.TranscribeTimeout == 0 {
 		c.TranscribeTimeout = 30 * time.Second
 	}
@@ -104,37 +99,8 @@ func newASRMonitor(logger *slog.Logger, backend asr.Transcriber, cfg asrMonitorC
 		logger:   logger,
 		cfg:      cfg,
 		inflight: make(chan struct{}, cfg.MaxConcurrent),
-		doneCh:   make(chan struct{}),
 	}
-	m.health.Store("unknown")
 	return m
-}
-
-// Start launches the health-poll goroutine. Stop or ctx cancellation
-// halts polling; in-flight Transcribe calls continue to completion since
-// they hold their own deadlines.
-func (m *asrMonitor) Start(ctx context.Context) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.stop != nil {
-		return
-	}
-	loopCtx, cancel := context.WithCancel(ctx)
-	m.stop = cancel
-	go m.healthLoop(loopCtx)
-}
-
-// Stop halts the health loop and waits for it to exit.
-func (m *asrMonitor) Stop() {
-	m.mu.Lock()
-	cancel := m.stop
-	m.stop = nil
-	m.mu.Unlock()
-	if cancel == nil {
-		return
-	}
-	cancel()
-	<-m.doneCh
 }
 
 // OnUtterance is the hook the audioMonitor calls when the VAD reports
@@ -332,48 +298,14 @@ func isWhisperRepetitionLoop(text string) bool {
 	return false
 }
 
-// healthLoop polls Healthy on cfg.HealthInterval and updates the
-// atomic health state.
-func (m *asrMonitor) healthLoop(ctx context.Context) {
-	defer m.doneOnce.Do(func() { close(m.doneCh) })
-
-	m.probe(ctx)
-
-	t := time.NewTicker(m.cfg.HealthInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			m.probe(ctx)
-		}
-	}
-}
-
-func (m *asrMonitor) probe(ctx context.Context) {
-	probeCtx, cancel := context.WithTimeout(ctx, m.cfg.HealthTimeout)
-	defer cancel()
-	if err := m.backend.Ping(probeCtx); err != nil {
-		m.health.Store("unhealthy")
-		m.lastHealthErr.Store(err.Error())
-		return
-	}
-	m.health.Store("healthy")
-	m.lastHealthErr.Store("")
-}
-
-// Snapshot returns the current ASRStats for inclusion in a status reply.
+// Snapshot returns the current ASRStats for inclusion in a status
+// reply. It touches no network: every field is a counter the transcribe
+// path already recorded, so status stays instant.
 func (m *asrMonitor) Snapshot() control.ASRStats {
 	out := control.ASRStats{
 		Backend:     m.cfg.BackendName,
 		Transcripts: m.transcripts.Load(),
-	}
-	if v, ok := m.health.Load().(string); ok {
-		out.Health = v
-	}
-	if v, ok := m.lastHealthErr.Load().(string); ok && v != "" {
-		out.LastHealthErr = v
+		Health:      control.HealthUnchecked,
 	}
 	if v, ok := m.lastTranscript.Load().(string); ok && v != "" {
 		out.LastTranscript = v

@@ -38,7 +38,6 @@ func TestEndToEnd_AudioToASR(t *testing.T) {
 	fake := &fakeASR{transcript: asrclient.Transcript{Text: "captured speech", Language: "en"}}
 	asrMon := newASRMonitor(discardLogger(), fake, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
@@ -95,7 +94,6 @@ func TestEndToEnd_TypeModeSession(t *testing.T) {
 	fake := &fakeASR{transcript: asrclient.Transcript{Text: "captured speech", Language: "en"}}
 	asrMon := newASRMonitor(discardLogger(), fake, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})

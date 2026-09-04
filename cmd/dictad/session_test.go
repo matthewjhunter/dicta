@@ -229,7 +229,6 @@ func newTestSession(t *testing.T) (*session, *fakeTyper, *fakeCuer, *resettableV
 	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "hello"}}
 	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
@@ -363,7 +362,6 @@ func TestSession_CloseFlushesInFlightUtterance(t *testing.T) {
 	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "last words"}}
 	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
@@ -452,8 +450,7 @@ func TestSession_PublishesSessionStateOnOpenAndClose(t *testing.T) {
 	cuer := &fakeCuer{}
 	asrFake := &fakeASR{}
 	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
-		BackendName:    "fake",
-		HealthInterval: time.Hour,
+		BackendName: "fake",
 	})
 	bus := newEventBus(discardLogger())
 	r := &recordingPush{}
@@ -513,8 +510,7 @@ func newClipSession(t *testing.T) (*session, *fakeClipper, *fakePreview, *fakeCu
 	cuer := &fakeCuer{}
 	asrFake := &fakeASR{}
 	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
-		BackendName:    "fake",
-		HealthInterval: time.Hour,
+		BackendName: "fake",
 	})
 	s := newSession(discardLogger(), typer, clipper, cuer, asrMon, &resettableVAD{}, nil, preview, nil, nil, nil, t.Context())
 	return s, clipper, preview, cuer
@@ -675,7 +671,6 @@ func TestSession_TypeModePublishesRawTranscript(t *testing.T) {
 	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "hello world", Language: "en"}}
 	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
@@ -735,7 +730,6 @@ func TestSession_ClipModePublishesCleanedTranscript(t *testing.T) {
 	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "i ate apples there delicious", Language: "en"}}
 	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
@@ -795,7 +789,6 @@ func TestSession_ClipModeCleanupErrorFallsBackToRaw(t *testing.T) {
 	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "hello there", Language: "en"}}
 	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
@@ -839,7 +832,6 @@ func TestSession_NilCleanerDefaultsToPassthrough(t *testing.T) {
 	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "raw text"}}
 	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
@@ -931,7 +923,6 @@ func TestSession_TypeModeAuditRecord(t *testing.T) {
 	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "hello world", Language: "en"}}
 	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
 		BackendName:       "wyoming",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
@@ -999,7 +990,6 @@ func TestSession_ClipModeAuditRecord(t *testing.T) {
 	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "i ate apples there delicious"}}
 	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
 		BackendName:       "openai",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
@@ -1052,7 +1042,6 @@ func TestSession_AuditInvokedForDrainedTranscript(t *testing.T) {
 	}
 	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
@@ -1152,7 +1141,6 @@ func TestSession_TypeModeSerializesDispatch(t *testing.T) {
 	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "hello"}}
 	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
@@ -1223,7 +1211,6 @@ func TestSession_TypeModeOrdering(t *testing.T) {
 	}
 	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
@@ -1281,7 +1268,6 @@ func TestSession_TypeModeSkipDoesNotBlockNext(t *testing.T) {
 	}
 	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
@@ -1316,7 +1302,6 @@ func TestSession_AuditFailureDoesNotBreakDispatch(t *testing.T) {
 	asrFake := &fakeASR{transcript: asrclient.Transcript{Text: "hello"}}
 	asrMon := newASRMonitor(discardLogger(), asrFake, asrMonitorConfig{
 		BackendName:       "fake",
-		HealthInterval:    time.Hour,
 		TranscribeTimeout: time.Second,
 		MaxConcurrent:     2,
 	})
