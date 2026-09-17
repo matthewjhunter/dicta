@@ -13,13 +13,15 @@ import (
 	"github.com/matthewjhunter/dicta/internal/control"
 )
 
-// audioMonitor is the phase-3 dev harness: a continuous capture+VAD loop
-// whose counters are exposed via the status handler so `dicta status`
-// can show audio is flowing.
+// audioMonitor is the capture+VAD loop that feeds sessions, with counters
+// exposed via the status handler so `dicta status` can show audio flowing.
 //
-// This is NOT the type-mode session orchestrator (phase 7) — it just
-// validates the audio plumbing end-to-end. When phase 7 lands, this
-// becomes part of (or is replaced by) the per-session state machine.
+// It runs in one of two lifecycles, chosen in main:
+//   - on-demand (the default, §8.2): the session starts it on open and
+//     stops it on close, via session.SetAudioLifecycle and StartIfStopped.
+//   - continuous (--audio-monitor): started once at daemon startup. Needed
+//     for VAD stats while idle and by the pcm-zero mute source, which has
+//     to observe frames while no session is open.
 type audioMonitor struct {
 	cap audio.Capture
 	vad audio.VAD
@@ -129,6 +131,19 @@ func (m *audioMonitor) Start(ctx context.Context) error {
 
 	go m.loop(frames)
 	return nil
+}
+
+// StartIfStopped is Start, but a no-op when capture is already running.
+// It is the session's on-demand start hook; session.syncAudio serialises
+// calls, so the check-then-start is not racing another starter.
+func (m *audioMonitor) StartIfStopped(ctx context.Context) error {
+	m.mu.Lock()
+	running := m.stop != nil
+	m.mu.Unlock()
+	if running {
+		return nil
+	}
+	return m.Start(ctx)
 }
 
 // Stop tears down the capture subprocess and waits for the loop to exit.

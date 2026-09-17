@@ -50,8 +50,18 @@ goes through `wl-copy` and the user pastes manually. Enforcement:
 Capture starts when a session opens and stops when it closes. There is
 no always-on listening in v1 (wakeword is deferred to v2 per D3).
 
-- `cmd/dictad/audiomonitor.go` — capture is started/stopped by the
-  daemon, with the session orchestrator deciding when via `Toggle`.
+- `cmd/dictad/session.go::syncAudio` — starts capture as a session opens
+  (before the open cue, rolling the open back if the microphone cannot
+  be opened) and stops it once a session closes. It reconciles against
+  the session's open state under a dedicated mutex, so overlapping
+  toggles cannot leave a closed session capturing.
+- `cmd/dictad/audiomonitor.go` — the capture loop the session drives.
+
+The one exception is an explicit opt-in: `--audio-monitor` captures
+continuously, for idle VAD stats and for the `pcm-zero`/`auto` unmute
+sources, which have to observe frames between sessions. Nothing enables
+it implicitly — `--unmute-to-dictate` with those sources refuses to
+start without it.
 - `cmd/dictad/session.go::Shutdown` — explicitly closes any open
   session on SIGTERM so capture stops cleanly.
 

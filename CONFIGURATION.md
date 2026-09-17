@@ -36,7 +36,7 @@ ExecStart=%h/.local/bin/dictad \
 | `--audio-backend` | `auto` | Capture backend: `pipewire`, `pulse`, or `auto`. Auto prefers PipeWire when available. |
 | `--audio-device` | (empty = system default) | Source name; PipeWire node name or pulse source. Run `pactl list sources short` to enumerate. |
 | `--audio-cues` | `true` | Play short tones on session open/close. Disable on shared microphones to avoid the cue bleeding into capture. |
-| `--audio-monitor` | `false` | Dev mode: continuously capture audio and surface VAD stats via `dicta status`. Most users do not need this. |
+| `--audio-monitor` | `false` | Capture continuously instead of only while a session is open. Surfaces idle VAD stats via `dicta status`, and is required by the `pcm-zero` and `auto` unmute sources, which must watch frames between sessions. Not needed for dictation: without it, capture starts when a session opens and stops when it closes. |
 
 The audio frame format is locked at 16 kHz mono int16 LE / 80 ms / 1280
 samples (D15 in the design doc). No flag changes this.
