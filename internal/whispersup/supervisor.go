@@ -285,6 +285,9 @@ func (s *Supervisor) buildCmd(ctx context.Context, port int) *exec.Cmd {
 		"--host", s.cfg.Host,
 		"--port", strconv.Itoa(port),
 		"-t", strconv.Itoa(s.cfg.Threads),
+		// whisper-server serves transcription at /inference unless told
+		// otherwise; the endpoint the client posts to is the OpenAI path.
+		"--inference-path", inferencePath,
 	}
 	args = append(args, s.cfg.ExtraArgs...)
 	cmd := exec.CommandContext(ctx, s.cfg.Binary, args...)
@@ -379,10 +382,13 @@ func (s *Supervisor) incRestart() {
 	s.mu.Unlock()
 }
 
-// endpointURL returns the OpenAI-compatible transcription URL for
-// host:port. The path matches whisper.cpp's whisper-server defaults.
+// inferencePath is the OpenAI-compatible transcription path. whisper-server
+// defaults to /inference, so buildCmd passes it via --inference-path.
+const inferencePath = "/v1/audio/transcriptions"
+
+// endpointURL returns the OpenAI-compatible transcription URL for host:port.
 func endpointURL(host string, port int) string {
-	return "http://" + net.JoinHostPort(host, strconv.Itoa(port)) + "/v1/audio/transcriptions"
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(port)) + inferencePath
 }
 
 // nextBackoff doubles d, capped at maxD.

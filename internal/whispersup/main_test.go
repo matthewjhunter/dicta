@@ -16,9 +16,9 @@ import (
 // TestMain doubles as the test stub binary. The supervisor's Binary
 // field is pointed at os.Executable(), and the stub mode is signalled
 // via the env var DICTA_WHISPERSUP_STUB. When set, the test binary
-// parses the same -m / --host / --port flags whisper-server would
-// accept and runs a tiny HTTP listener so the readiness probe and
-// crash-restart paths can be exercised hermetically.
+// parses the same -m / --host / --port / --inference-path flags
+// whisper-server would accept and runs a tiny HTTP listener so the
+// readiness probe and crash-restart paths can be exercised hermetically.
 //
 // In test-mode (no stub env var), wrap m.Run with goleak so any
 // supervisor goroutine that survives a test surfaces as a leak.
@@ -42,6 +42,8 @@ func runStubServer() error {
 	host := fs.String("host", "127.0.0.1", "")
 	port := fs.Int("port", 0, "")
 	threads := fs.Int("t", 1, "")
+	// Real whisper-server's default; the supervisor must override it.
+	inferencePath := fs.String("inference-path", "/inference", "")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
 	}
@@ -73,7 +75,7 @@ func runStubServer() error {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/audio/transcriptions", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(*inferencePath, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"text":"stub","language":"en","duration":1}`))
 	})
