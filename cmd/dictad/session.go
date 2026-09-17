@@ -73,6 +73,15 @@ type session struct {
 	// tests and clip-only deployments leave it nil.
 	flushAudio func()
 
+	// startAudio / stopAudio drive on-demand capture (§8.2): capture runs
+	// only while a session is open. Both nil when capture is continuous
+	// (--audio-monitor) or absent (tests). Set via SetAudioLifecycle.
+	// audioMu serialises syncAudio so an overlapping close and open
+	// converge on the latest open state instead of racing Start/Stop.
+	startAudio func(context.Context) error
+	stopAudio  func() error
+	audioMu    sync.Mutex
+
 	// daemonCtx is the long-lived parent ctx for typer dispatch. We do
 	// NOT derive a per-session ctx here because cancelling a session
 	// while a transcript is mid-type would leave a partial phrase on
@@ -178,6 +187,37 @@ func newSession(logger *slog.Logger, typer dispatch.Typer, clipper dispatch.Clip
 	s.typeWorkerDone = make(chan struct{})
 	go s.typeWorker()
 	return s
+}
+
+// SetAudioLifecycle makes capture on-demand: start runs when a session
+// opens, stop when it closes. start must be a no-op when capture is
+// already running; stop must be a no-op when it is not.
+func (s *session) SetAudioLifecycle(start func(context.Context) error, stop func() error) {
+	s.startAudio = start
+	s.stopAudio = stop
+}
+
+// syncAudio starts or stops capture to match the session's open state.
+// It reads the state under audioMu rather than taking a direction from
+// the caller, so when a close and an open overlap, whichever syncs last
+// sees the final state and capture converges on it. s.mu is NOT held
+// across start/stop: Stop waits for the audio loop, whose OnUtterance
+// callback takes s.mu.
+func (s *session) syncAudio() error {
+	if s.startAudio == nil || s.stopAudio == nil {
+		return nil
+	}
+	s.audioMu.Lock()
+	defer s.audioMu.Unlock()
+	s.mu.Lock()
+	open := s.open
+	s.mu.Unlock()
+	if open {
+		// daemonCtx, not the request ctx: capture must outlive the
+		// control-socket request that opened the session.
+		return s.startAudio(s.daemonCtx)
+	}
+	return s.stopAudio()
 }
 
 // typeWorker dispatches type-mode jobs in submission order. Exits when
@@ -336,24 +376,31 @@ func (s *session) open_(ctx context.Context, mode sessionMode) error {
 	epoch := s.epoch
 	s.mu.Unlock()
 
+	// Reset VAD calibration before on-demand capture starts, so the
+	// reset cannot race a running audio loop.
+	if s.vad != nil {
+		if r, ok := s.vad.(interface{ Reset() }); ok {
+			r.Reset()
+		}
+	}
+
+	// Start capture before publishing state and playing the cue, so a
+	// microphone that cannot be opened rolls the session back to closed
+	// rather than announcing a session that can never hear anything.
+	if err := s.syncAudio(); err != nil {
+		s.rollbackOpen()
+		s.logger.Warn("session.open: audio capture failed to start", "err", err)
+		return fmt.Errorf("audio capture: %w", err)
+	}
+
 	if mode == modeClip && s.preview != nil {
 		// Spawn before publishing state and playing cue so a spawn
 		// failure rolls the session back to closed without a confusing
 		// half-open emission.
 		if err := s.preview.Spawn(s.daemonCtx); err != nil {
-			s.mu.Lock()
-			s.epoch++
-			s.mode = modeNone
-			s.open = false
-			s.mu.Unlock()
+			s.rollbackOpen()
 			s.logger.Warn("session.open: preview spawn failed", "err", err)
 			return fmt.Errorf("preview spawn: %w", err)
-		}
-	}
-
-	if s.vad != nil {
-		if r, ok := s.vad.(interface{ Reset() }); ok {
-			r.Reset()
 		}
 	}
 
@@ -366,6 +413,20 @@ func (s *session) open_(ctx context.Context, mode sessionMode) error {
 		}
 	}
 	return nil
+}
+
+// rollbackOpen undoes a partially-completed open_: back to closed with a
+// bumped epoch (so nothing from the aborted session can dispatch), and
+// capture stopped if on-demand capture had already started.
+func (s *session) rollbackOpen() {
+	s.mu.Lock()
+	s.epoch++
+	s.mode = modeNone
+	s.open = false
+	s.mu.Unlock()
+	if err := s.syncAudio(); err != nil {
+		s.logger.Warn("session.open: stopping audio after failed open", "err", err)
+	}
 }
 
 // close transitions the session to (none, open=false). Closing does
@@ -407,6 +468,12 @@ func (s *session) close(ctx context.Context, reason string) error {
 	s.mode = modeNone
 	s.open = false
 	s.mu.Unlock()
+
+	// On-demand capture stops once the flush above has emitted the last
+	// utterance. Queued ASR work is unaffected: it holds its own PCM.
+	if err := s.syncAudio(); err != nil {
+		s.logger.Warn("session.close: audio capture failed to stop", "err", err)
+	}
 
 	if prevMode == modeClip && s.preview != nil {
 		if err := s.preview.Kill(); err != nil {

@@ -31,7 +31,7 @@ const version = "0.1.0-dev"
 
 func main() {
 	socketFlag := flag.String("socket", "", "control socket path (default: $XDG_RUNTIME_DIR/dicta.sock)")
-	audioMonitorFlag := flag.Bool("audio-monitor", false, "phase-3 dev mode: continuously capture audio and expose VAD stats via `dicta status`")
+	audioMonitorFlag := flag.Bool("audio-monitor", false, "capture audio continuously instead of only while a session is open: exposes idle VAD stats via `dicta status`, and is required by the pcm-zero/auto unmute sources")
 	audioBackendFlag := flag.String("audio-backend", "auto", "audio capture backend: pipewire | pulse | auto")
 	audioDeviceFlag := flag.String("audio-device", "", "audio source name (PipeWire node or pulse source); empty = system default")
 	asrBackendFlag := flag.String("asr-backend", "", "asr backend: wyoming | whispercpp | openai (empty = disabled)")
@@ -97,8 +97,12 @@ func main() {
 	bus := newEventBus(logger)
 	handler := &stubHandler{version: version, bus: bus}
 
+	// Capture exists whenever something consumes it: a session (any ASR
+	// backend) or the continuous monitor. When it runs is decided below --
+	// only while a session is open (§8.2), unless --audio-monitor asks for
+	// continuous capture.
 	var audioMon *audioMonitor
-	if *audioMonitorFlag {
+	if *audioMonitorFlag || *asrBackendFlag != "" {
 		audioMon = newAudioMonitor(logger, audio.CaptureConfig{
 			Backend: audio.CaptureBackend(*audioBackendFlag),
 			Device:  *audioDeviceFlag,
@@ -283,6 +287,9 @@ func main() {
 
 		sess = newSession(logger, typer, clipper, cuer, handler.asr, audioMon.VAD(), bus, preview, cleaner, auditW, audioMon.Flush, ctx)
 		audioMon.onUtterance = sess.OnUtterance
+		if !*audioMonitorFlag {
+			sess.SetAudioLifecycle(audioMon.StartIfStopped, audioMon.Stop)
+		}
 		handler.session = sess
 		logger.Info("session orchestrator ready", "ydotool", *ydotoolBinaryFlag, "audio_cues", *audioCuesFlag)
 
@@ -294,7 +301,15 @@ func main() {
 		// actually toggle mute for the watcher to act.
 		if *unmuteToDictateFlag {
 			debounce := max(*unmuteDebounceFlag, time.Millisecond)
-			src, err := buildMuteSource(*unmuteSourceFlag, logger, audioMon, *audioDeviceFlag)
+			// The pcm-zero source has to see frames while no session is
+			// open, so it only gets the pump when capture is continuous;
+			// buildMuteSource rejects pcm-zero/auto without one, keeping
+			// always-on capture an explicit --audio-monitor opt-in.
+			var continuousPump *audioMonitor
+			if *audioMonitorFlag {
+				continuousPump = audioMon
+			}
+			src, err := buildMuteSource(*unmuteSourceFlag, logger, continuousPump, *audioDeviceFlag)
 			if err != nil {
 				logger.Error("unmute-to-dictate: build source", "err", err, "source", *unmuteSourceFlag)
 				os.Exit(1)
@@ -324,13 +339,20 @@ func main() {
 	}
 
 	if audioMon != nil {
-		if err := audioMon.Start(ctx); err != nil {
-			logger.Error("audio.start", "err", err)
-			os.Exit(1)
-		}
+		// Stop is idempotent, so this also covers on-demand capture left
+		// running by a session that was open at shutdown.
 		defer func() { _ = audioMon.Stop() }()
 		handler.audio = audioMon
-		logger.Info("audio-monitor started", "backend", audioMon.Snapshot().Backend)
+		switch {
+		case *audioMonitorFlag:
+			if err := audioMon.Start(ctx); err != nil {
+				logger.Error("audio.start", "err", err)
+				os.Exit(1)
+			}
+			logger.Info("audio-monitor started", "backend", audioMon.Snapshot().Backend, "capture", "continuous")
+		case sess != nil:
+			logger.Info("audio capture on-demand: runs only while a session is open")
+		}
 	}
 
 	srv, err := control.Listen(socketPath, handler, func(format string, args ...any) {

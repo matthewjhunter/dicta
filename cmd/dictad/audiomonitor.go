@@ -13,13 +13,15 @@ import (
 	"github.com/matthewjhunter/dicta/internal/control"
 )
 
-// audioMonitor is the phase-3 dev harness: a continuous capture+VAD loop
-// whose counters are exposed via the status handler so `dicta status`
-// can show audio is flowing.
+// audioMonitor is the capture+VAD loop that feeds sessions, with counters
+// exposed via the status handler so `dicta status` can show audio flowing.
 //
-// This is NOT the type-mode session orchestrator (phase 7) — it just
-// validates the audio plumbing end-to-end. When phase 7 lands, this
-// becomes part of (or is replaced by) the per-session state machine.
+// It runs in one of two lifecycles, chosen in main:
+//   - on-demand (the default, §8.2): the session starts it on open and
+//     stops it on close, via session.SetAudioLifecycle and StartIfStopped.
+//   - continuous (--audio-monitor): started once at daemon startup. Needed
+//     for VAD stats while idle and by the pcm-zero mute source, which has
+//     to observe frames while no session is open.
 type audioMonitor struct {
 	cap audio.Capture
 	vad audio.VAD
@@ -131,6 +133,19 @@ func (m *audioMonitor) Start(ctx context.Context) error {
 	return nil
 }
 
+// StartIfStopped is Start, but a no-op when capture is already running.
+// It is the session's on-demand start hook; session.syncAudio serialises
+// calls, so the check-then-start is not racing another starter.
+func (m *audioMonitor) StartIfStopped(ctx context.Context) error {
+	m.mu.Lock()
+	running := m.stop != nil
+	m.mu.Unlock()
+	if running {
+		return nil
+	}
+	return m.Start(ctx)
+}
+
 // Stop tears down the capture subprocess and waits for the loop to exit.
 func (m *audioMonitor) Stop() error {
 	m.mu.Lock()
@@ -226,14 +241,22 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 					// gate is intentionally not consulted here —
 					// anything that ran long enough to hit the cap is
 					// unambiguously speech.
+					//
+					// The cut lands at the quietest frame near the end rather
+					// than exactly at the cap, so it falls between words: a
+					// cut mid-word splits it across two ASR requests and both
+					// halves come back wrong ("my phone" / "first sentence").
+					// Audio after the cut carries into the next chunk.
 					if m.maxUtteranceBytes > 0 && len(accumulator) >= m.maxUtteranceBytes {
-						utterance := make([]byte, len(accumulator))
-						copy(utterance, accumulator)
+						cut := quietestSplit(accumulator, splitSearchBytes)
+						utterance := make([]byte, cut)
+						copy(utterance, accumulator[:cut])
 						m.log.Warn("audio.utterance force-split: cap reached",
 							"max_bytes", m.maxUtteranceBytes,
-							"audio_ms", utteranceMs(len(utterance)))
+							"audio_ms", utteranceMs(len(utterance)),
+							"carried_ms", utteranceMs(len(accumulator)-cut))
 						m.onUtterance(utterance)
-						accumulator = accumulator[:0]
+						accumulator = append(accumulator[:0], accumulator[cut:]...)
 					}
 				}
 			} else {
@@ -283,6 +306,34 @@ func (m *audioMonitor) Flush() {
 	case <-time.After(500 * time.Millisecond):
 		m.log.Warn("audio.flush: loop did not complete flush within timeout")
 	}
+}
+
+// splitSearchBytes is how far back from the cap a force-split looks for a
+// pause: 2 s, long enough to reach the gap between words at any normal
+// speaking rate.
+const splitSearchBytes = 2 * audio.SampleRateHz * audio.SampleWidth
+
+// quietestSplit returns where to cut an over-long utterance: the end of the
+// lowest-energy frame within the trailing search window. The window is
+// capped at half the buffer so every chunk keeps at least half the cap
+// (a quiet frame near the start must not produce a tiny chunk). Ties go to
+// the latest frame, so audio with no pause (a continuous tone) cuts at the
+// end, as a plain cap would. The accumulator is built from whole frames,
+// so the result is always frame-aligned.
+func quietestSplit(pcm []byte, searchBytes int) int {
+	frames := len(pcm) / audio.FrameBytes
+	if frames == 0 {
+		return len(pcm)
+	}
+	window := min(searchBytes/audio.FrameBytes, frames/2)
+	best, bestRMS := frames, math.Inf(1)
+	for i := frames - window; i < frames; i++ {
+		rms := audio.RMS(pcm[i*audio.FrameBytes : (i+1)*audio.FrameBytes])
+		if rms <= bestRMS {
+			best, bestRMS = i+1, rms
+		}
+	}
+	return best * audio.FrameBytes
 }
 
 // utteranceMs approximates the audio duration of a PCM byte buffer
