@@ -48,7 +48,7 @@ samples (D15 in the design doc). No flag changes this.
 | `--vad-calibrate` | `500ms` | Noise-floor calibration window at session open. Raise if you tend to start speaking immediately. |
 | `--vad-hangover` | `800ms` | Continuous silence required to declare end-of-utterance. Lower values commit faster but split mid-sentence pauses; raise to coalesce more aggressively. |
 | `--vad-margin-db` | `6` | Speech threshold = noise floor + this many dB. Raise if ambient noise causes spurious speech detection. |
-| `--vad-max-utterance` | `10s` | Hard cap on a single utterance's duration. Force-emits and starts a new chunk on overflow (`0` disables). |
+| `--vad-max-utterance` | `10s` | Hard cap on a single utterance's duration, for a VAD that never declares end-of-utterance. On overflow the chunk is cut at the quietest 80 ms frame within the last 2 s (so the cut falls between words, not mid-word) and the audio after the cut starts the next chunk (`0` disables). |
 | `--vad-min-speech-ms` | `400ms` | Minimum raw-energy speech duration per utterance (rounded to 80 ms frames, so the default is 5 frames). Shorter blips — mic clicks, breath puffs, the cue tone — are dropped before reaching ASR. Whisper-family backends reliably hallucinate "Thank you" / "Thanks for watching" / "you" on those blips. Lower this if very brief one-word utterances ("yes", "no") get dropped; `0` disables the gate. |
 
 The ASR layer also drops a small deny-list of known Whisper artifact
