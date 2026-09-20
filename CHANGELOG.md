@@ -6,6 +6,8 @@ Entries describe what changed for someone running or building dicta. The complet
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-20
+
 ### Added
 
 - `dicta check` runs a real end-to-end ASR check: it submits an embedded "Hello world" fixture to the configured backend and compares the returned transcript. A misconfigured or unreachable backend is now diagnosable without dictating into it and guessing. This is a live round trip, so it takes seconds.
@@ -71,7 +73,8 @@ First release. A Linux/Wayland-first voice dictation daemon in pure Go.
 - `MemoryDenyWriteExecute=true` in the unit requires the daemon to be pure Go with no CGo, JIT, or embedded interpreter.
 - The control-protocol command parser is fuzzed, and `goleak` guards the goroutine-heavy packages.
 
-[Unreleased]: https://github.com/matthewjhunter/dicta/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/matthewjhunter/dicta/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/matthewjhunter/dicta/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/matthewjhunter/dicta/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/matthewjhunter/dicta/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/matthewjhunter/dicta/releases/tag/v0.1.0
