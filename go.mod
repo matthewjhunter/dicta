@@ -1,6 +1,6 @@
 module github.com/matthewjhunter/dicta
 
-go 1.25.11
+go 1.26.8
 
 require github.com/matthewjhunter/asrclient v0.1.1
 
