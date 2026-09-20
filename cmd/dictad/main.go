@@ -366,6 +366,14 @@ func main() {
 
 	logger.Info("dictad started", "version", version, "socket", socketPath, "audio_monitor", *audioMonitorFlag)
 
+	// The control socket is bound and queuing connections, so the
+	// daemon is usable: tell systemd (no-op outside it). A failure to
+	// notify is not fatal — the daemon works fine, systemd just holds
+	// the start job until its timeout — so warn and carry on.
+	if err := notifyReady(); err != nil {
+		logger.Warn("sd_notify", "err", err)
+	}
+
 	if err := srv.Serve(ctx); err != nil {
 		logger.Error("serve", "err", err)
 		os.Exit(1)
