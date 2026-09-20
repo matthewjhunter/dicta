@@ -5,10 +5,15 @@ After=graphical-session.target pipewire.service
 Wants=pipewire.service
 
 [Service]
-# Type=simple because dictad does not yet call sd_notify(READY=1).
-# When the daemon learns to signal readiness, switch to Type=notify so
-# units ordered After= dictad don't race the socket coming up.
-Type=simple
+# Type=notify: dictad sends sd_notify(READY=1) once the control socket
+# is bound and accepting, so units ordered After= dictad do not race it,
+# and a startup that dies in a config check (a missing ydotool, a bad
+# --asr-backend) fails the start job itself rather than reporting
+# success and failing a moment later.
+Type=notify
+# Redundant (main is the default) but stated explicitly: dictad spawns
+# dicta-preview, and only the main process may signal readiness.
+NotifyAccess=main
 # Installed by `task install:user` into the user's ~/.local/bin. For a
 # system-wide install, override via `systemctl --user edit` (or ship a
 # variant of this unit pointing at /usr/local/bin/dictad).
