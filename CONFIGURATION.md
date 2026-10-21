@@ -340,7 +340,10 @@ transcript text — `dicta status` is safe to run while screen-sharing.
 ## Logging
 
 Structured JSON to stdout (under systemd) or text to stderr (TTY).
-Levels DEBUG, INFO, WARN, ERROR (default INFO). Tail with:
+Levels DEBUG, INFO, WARN, ERROR, selected with `--log-level` (default
+INFO). Transcript text is logged only at DEBUG; INFO carries each
+utterance's timing and length without the content, because the
+daemon's stderr lands in journald. Tail with:
 
 ```sh
 journalctl --user -u dictad.service -f
