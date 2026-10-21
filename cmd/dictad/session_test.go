@@ -1486,3 +1486,44 @@ func TestSession_IdleTimeoutFromOldSessionDoesNotCloseNewOne(t *testing.T) {
 		t.Fatalf("second session never closed on its own idle timer")
 	}
 }
+
+func TestSession_CaptureLostClosesTypeSession(t *testing.T) {
+	// The capture device vanished (USB mic unplugged, hub knocked). An
+	// open type-mode session has nothing to hear and no way to be
+	// closed by the mic button, so it closes itself with the usual
+	// close tone.
+	s, _, cuer, _, _ := newTestSession(t)
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatalf("Toggle: %v", err)
+	}
+	s.OnCaptureLost()
+	if !waitSessionClosed(s, time.Second) {
+		t.Fatalf("type session did not close after capture loss")
+	}
+	if played := cuer.Played(); len(played) != 2 || played[1] != audio.CueClose {
+		t.Errorf("cues: got %v; want [open close]", played)
+	}
+}
+
+func TestSession_CaptureLostLeavesClipSessionOpen(t *testing.T) {
+	// Clip-mode is safe by construction: nothing leaves the panel
+	// until Enter. The user may be mid-edit, so the panel stays.
+	s, _, _, _ := newClipSession(t)
+	if err := s.Toggle(t.Context(), "clip"); err != nil {
+		t.Fatalf("Toggle: %v", err)
+	}
+	s.OnCaptureLost()
+	time.Sleep(50 * time.Millisecond)
+	if mode, open := s.Snapshot(); !open || mode != "clip" {
+		t.Errorf("clip session after capture loss: mode=%s open=%v; want clip open", mode, open)
+	}
+}
+
+func TestSession_CaptureLostWhenClosedIsNoop(t *testing.T) {
+	s, _, cuer, _, _ := newTestSession(t)
+	s.OnCaptureLost()
+	time.Sleep(50 * time.Millisecond)
+	if played := cuer.Played(); len(played) != 0 {
+		t.Errorf("cues played with no session open: %v", played)
+	}
+}
