@@ -41,7 +41,8 @@ ExecStart=%h/.local/bin/dictad \
 | Flag | Default | What it does |
 |------|---------|--------------|
 | `--audio-backend` | `auto` | Capture backend: `pipewire`, `pulse`, or `auto`. Auto prefers PipeWire when available. |
-| `--audio-device` | (empty = system default) | Source name; PipeWire node name or pulse source. Run `pactl list sources short` to enumerate. |
+| `--audio-device` | (empty = system default) | Source name; PipeWire node name or pulse source. Run `pactl list sources short` to enumerate. A named PipeWire device is captured exclusively: if it is unplugged or has not enumerated yet, capture waits for it instead of falling back to the default source, and resumes when it returns. Pin the dictation mic here so switching the system default to a headset for a call never changes what dicta hears. |
+| `--capture-stall-timeout` | `1s` | Report the capture device absent when no frame has arrived for this long (frames normally arrive every 80 ms). An open type-mode session closes, `dicta status` shows `audio.stalled: true`, and the unmute-to-dictate watcher ignores mute state until frames resume. `0` disables. |
 | `--audio-cues` | `true` | Play short tones on session open/close. Disable on shared microphones to avoid the cue bleeding into capture. |
 | `--audio-monitor` | `false` | Capture continuously instead of only while a session is open. Surfaces idle VAD stats via `dicta status`, and is required by the `pcm-zero` and `auto` unmute sources, which must watch frames between sessions. Not needed for dictation: without it, capture starts when a session opens and stops when it closes. |
 
@@ -136,7 +137,7 @@ Two ways to stop auto-activation without killing the daemon:
   Bind `dicta suspend` to a compositor key for a one-keystroke off-switch
   before an audio call. `dicta status` shows the current state in
   `auto_activation` (`active` / `suspended (manual)` / `suspended
-  (flapping)`).
+  (flapping)` / `device absent`).
 - **Automatic flap guard** — if more than `--unmute-flap-threshold`
   transitions fire within `--unmute-flap-window`, the watcher
   auto-suspends with reason `flapping`, emits one `notify-send`, and
@@ -157,6 +158,16 @@ Startup state is sampled, not assumed: the first audio frame after
 daemon start seeds the watcher's baseline without firing a transition,
 so the daemon won't open a session at boot just because the mic
 happens to be unmuted.
+
+The same rule applies when the mic goes away and comes back. A USB
+mic that is unplugged, or a hub reset that takes it along, stops the
+frame stream; after `--capture-stall-timeout` the daemon closes any
+open type-mode session and the watcher stops acting on mute state
+(`auto_activation: device absent`). When frames resume, the returning
+mic's state seeds the watcher again rather than firing it, so a replug
+is never read as a mute-button press. This needs `--audio-device` set:
+with the system default, PipeWire moves the stream to another mic and
+the daemon never sees a gap.
 
 ## ASR backend
 
