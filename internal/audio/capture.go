@@ -221,7 +221,7 @@ func (c *SubprocessCapture) resolveCommand() (backend, exe string, args []string
 // pinnedTargetProps is the pw-record stream property set for a named
 // capture target. SPA-JSON dict syntax, as pw-cat's -P flag expects. A
 // constant rather than built from config, so no user value reaches it.
-const pinnedTargetProps = "{ node.dont-fallback = true node.linger = true }"
+const pinnedTargetProps = "{ node.dont-fallback = true node.linger = true node.dont-move = true }"
 
 // pipewireArgs builds argv for pw-record. Format flags align with D15.
 func pipewireArgs(cfg CaptureConfig) []string {
@@ -243,6 +243,16 @@ func pipewireArgs(cfg CaptureConfig) []string {
 		// frames while the node is absent, and resumes by itself
 		// when it returns. The audio monitor turns that gap into a
 		// capture-stall signal. Verified against PipeWire 1.6.
+		//
+		// node.dont-move closes a hole in that: when the named device
+		// is also the system default, WirePlumber's follow-default
+		// policy writes target.node=-1 into the stream's metadata on
+		// first link, and metadata outranks the named target. The
+		// stream then had no defined target to wait for and stayed
+		// parked after the device returned. dont-move makes the policy
+		// skip the metadata lookup, so the named target always wins.
+		// It also means pavucontrol-style moves are refused, which is
+		// right for a stream that must only ever hear one mic.
 		args = append(args, "-P", pinnedTargetProps)
 	}
 	// pw-record writes WAV by default unless we point it at "-" with raw

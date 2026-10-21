@@ -119,7 +119,11 @@ func TestPipewireArgs_PinnedDeviceNeverFallsBack(t *testing.T) {
 		t.Fatalf("expected -P <properties> for a pinned device, got %v", args)
 	}
 	props := args[i+1]
-	for _, want := range []string{"node.dont-fallback = true", "node.linger = true"} {
+	// node.dont-move matters when the named device is also the system
+	// default: WirePlumber then marks the stream "follow default" in
+	// metadata, and without dont-move that metadata outranks the named
+	// target, so the stream never waits for the device to return.
+	for _, want := range []string{"node.dont-fallback = true", "node.linger = true", "node.dont-move = true"} {
 		if !strings.Contains(props, want) {
 			t.Errorf("properties %q missing %q", props, want)
 		}
