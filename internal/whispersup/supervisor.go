@@ -236,16 +236,26 @@ func (s *Supervisor) run(ctx context.Context) {
 		exitCh := make(chan error, 1)
 		go func() { exitCh <- cmd.Wait() }()
 
+		// reapAfterKill drains Wait() once we have killed the process
+		// group ourselves. The exit status is expected to be a signal
+		// death and carries nothing actionable, so it is logged at
+		// debug only.
+		reapAfterKill := func() {
+			if err := <-exitCh; err != nil {
+				s.logger.Debug("whispersup.exit after kill", "err", err)
+			}
+		}
+
 		select {
 		case <-s.stopCh:
 			s.setState(StateStopping)
 			s.killGroup(cmd)
-			<-exitCh
+			reapAfterKill()
 			return
 		case <-ctx.Done():
 			s.setState(StateStopping)
 			s.killGroup(cmd)
-			<-exitCh
+			reapAfterKill()
 			return
 		case err := <-exitCh:
 			s.logger.Warn("whispersup.exit", "err", err, "pid", cmd.Process.Pid)
