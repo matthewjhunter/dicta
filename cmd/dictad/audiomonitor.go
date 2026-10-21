@@ -150,12 +150,13 @@ func (m *audioMonitor) Start(ctx context.Context) error {
 		return err
 	}
 
+	done := make(chan struct{})
 	m.stop = cancel
-	m.doneSignal = make(chan struct{})
+	m.doneSignal = done
 	m.running.Store(true)
 	m.backend.Store(m.cap.Backend())
 
-	go m.loop(frames)
+	go m.loop(frames, done)
 	return nil
 }
 
@@ -195,8 +196,12 @@ func (m *audioMonitor) Stop() error {
 	return nil
 }
 
-func (m *audioMonitor) loop(frames <-chan audio.Frame) {
-	defer close(m.doneSignal)
+// loop is the capture goroutine. done is handed in rather than read
+// from the struct: Stop clears the field under the lock, and a Stop
+// that lands before the goroutine has read it would close a nil
+// channel.
+func (m *audioMonitor) loop(frames <-chan audio.Frame, done chan<- struct{}) {
+	defer close(done)
 	energyVAD, _ := m.vad.(*audio.EnergyVAD)
 
 	var (
