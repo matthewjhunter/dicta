@@ -175,29 +175,37 @@ func (m *asrMonitor) transcribe(pcm []byte, onTranscript func(transcriptResult),
 			"audio_ms", int(time.Duration(len(pcm))/time.Duration(2*16)))
 		text = cleaned
 	}
+	// Transcript text is DEBUG-only. dictad's stderr lands in journald,
+	// and the default level is INFO, so logging text at INFO would put
+	// every dictated phrase into the system journal. INFO lines keep
+	// the metadata (length, timing, utterance id) for diagnosing
+	// latency and drops without the content.
 	if isWhisperHallucination(text) {
 		m.logger.Info("asr.transcript dropped: hallucination phrase",
-			"text", text,
+			"chars", len(text),
 			"audio_ms", int(time.Duration(len(pcm))/time.Duration(2*16)),
 			"duration_ms", dur.Milliseconds())
+		m.logger.Debug("asr.transcript dropped text", "text", text)
 		return
 	}
 	if isWhisperRepetitionLoop(text) {
 		m.logger.Info("asr.transcript dropped: repetition loop",
-			"text", text,
+			"chars", len(text),
 			"audio_ms", int(time.Duration(len(pcm))/time.Duration(2*16)),
 			"duration_ms", dur.Milliseconds())
+		m.logger.Debug("asr.transcript dropped text", "text", text)
 		return
 	}
 	m.transcripts.Add(1)
 	m.lastTranscript.Store(text)
 	uttID := fmt.Sprintf("u%d-%d", start.Unix(), m.utteranceSeq.Add(1))
 	m.logger.Info("asr.transcript",
-		"text", text,
+		"chars", len(text),
 		"language", tr.Language,
 		"utterance_id", uttID,
 		"audio_ms", int(time.Duration(len(pcm))/time.Duration(2*16)),
 		"duration_ms", dur.Milliseconds())
+	m.logger.Debug("asr.transcript text", "text", text, "utterance_id", uttID)
 	if text == "" {
 		return
 	}

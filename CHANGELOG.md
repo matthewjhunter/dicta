@@ -6,6 +6,14 @@ Entries describe what changed for someone running or building dicta. The complet
 
 ## [Unreleased]
 
+### Added
+
+- `--log-level` (`debug`, `info`, `warn`, `error`; default `info`) sets `dictad`'s log verbosity.
+
+### Changed
+
+- **Transcript text is no longer logged at `info`.** `dictad` logs to stderr and systemd forwards that to journald, so every dictated phrase was landing in the system journal at the default level; with `--unmute-to-dictate`, so was anything the mic overheard while a session was open. The `asr.transcript` lines keep their timing, length and utterance id at `info`; the text now appears only under `--log-level debug`. Existing journal entries are unaffected, so vacuum the journal if you want the history gone.
+
 ## [0.1.3] - 2026-09-20
 
 ### Added

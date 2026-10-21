@@ -76,9 +76,15 @@ func main() {
 	unmuteDebounceFlag := flag.Duration("unmute-to-dictate-debounce", 1*time.Second, "minimum duration a mute-state change must persist before the watcher fires a transition. Lower for snappier response, raise if you see spurious toggles.")
 	unmuteFlapWindowFlag := flag.Duration("unmute-flap-window", defaultFlapWindow, "sliding window for the unmute-to-dictate flap guard: if more than --unmute-flap-threshold transitions fire within this window, the watcher auto-suspends (a noise-gated non-dictation device would otherwise loop the mic-cue beep). Resume with `dicta resume`.")
 	unmuteFlapThresholdFlag := flag.Int("unmute-flap-threshold", defaultFlapThreshold, "transitions-per-window before the unmute-to-dictate flap guard auto-suspends. 0 disables the guard.")
+	logLevelFlag := flag.String("log-level", "info", "log level: debug, info, warn, or error. Transcript text is logged only at debug; info carries timing and length metadata without the content.")
 	flag.Parse()
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(*logLevelFlag)); err != nil {
+		fmt.Fprintf(os.Stderr, "dictad: --log-level %q: %v\n", *logLevelFlag, err)
+		os.Exit(2)
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(logger)
 
 	socketPath := *socketFlag
