@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -427,4 +429,75 @@ func TestASRMonitor_CheckReportsDegraded(t *testing.T) {
 	if info.Expected != asr.CheckPhrase {
 		t.Errorf("Expected: got %q want %q", info.Expected, asr.CheckPhrase)
 	}
+}
+
+// TestASRMonitor_TranscriptTextOnlyAtDebug guards against transcript
+// text reaching the journal at the default log level. dictad logs to
+// stderr, which systemd forwards to journald, so an INFO line carrying
+// the text would put every dictated phrase (and, with
+// --unmute-to-dictate, everything the mic overheard) into the system
+// journal. Text is DEBUG-only; INFO keeps the metadata.
+func TestASRMonitor_TranscriptTextOnlyAtDebug(t *testing.T) {
+	const kept = "the quick brown dictation phrase"
+	const dropped = "Thank you." // whisper hallucination phrase
+
+	run := func(t *testing.T, level slog.Level, text string) string {
+		t.Helper()
+		var buf bytes.Buffer
+		var mu sync.Mutex
+		logger := slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: level}))
+		f := &fakeASR{transcript: asrclient.Transcript{Text: text}}
+		m := newASRMonitor(logger, f, asrMonitorConfig{
+			BackendName:       "fake",
+			TranscribeTimeout: time.Second,
+			MaxConcurrent:     1,
+		})
+		m.OnUtterance(make([]byte, 1280), func(transcriptResult) {}, nil)
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) && f.transcribeCall.Load() < 1 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		time.Sleep(20 * time.Millisecond)
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.String()
+	}
+
+	t.Run("info omits kept text", func(t *testing.T) {
+		out := run(t, slog.LevelInfo, kept)
+		if !strings.Contains(out, "asr.transcript") {
+			t.Errorf("INFO should still log the transcript event; got:\n%s", out)
+		}
+		if strings.Contains(out, kept) {
+			t.Errorf("INFO must not carry transcript text; got:\n%s", out)
+		}
+	})
+	t.Run("info omits dropped text", func(t *testing.T) {
+		out := run(t, slog.LevelInfo, dropped)
+		if !strings.Contains(out, "hallucination phrase") {
+			t.Errorf("INFO should still log the drop; got:\n%s", out)
+		}
+		if strings.Contains(out, dropped) {
+			t.Errorf("INFO must not carry dropped transcript text; got:\n%s", out)
+		}
+	})
+	t.Run("debug includes text", func(t *testing.T) {
+		out := run(t, slog.LevelDebug, kept)
+		if !strings.Contains(out, kept) {
+			t.Errorf("DEBUG should carry transcript text; got:\n%s", out)
+		}
+	})
+}
+
+// lockedWriter serialises writes from the monitor's worker goroutine
+// against the test's read of the buffer.
+type lockedWriter struct {
+	w  io.Writer
+	mu *sync.Mutex
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }

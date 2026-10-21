@@ -6,6 +6,14 @@ Entries describe what changed for someone running or building dicta. The complet
 
 ## [Unreleased]
 
+### Added
+
+- `--log-level` (`debug`, `info`, `warn`, `error`; default `info`) sets `dictad`'s log verbosity.
+
+### Changed
+
+- **Transcript text is no longer logged at `info`.** `dictad` logs to stderr and systemd forwards that to journald, so every dictated phrase was landing in the system journal at the default level; with `--unmute-to-dictate`, so was anything the mic overheard while a session was open. The `asr.transcript` lines keep their timing, length and utterance id at `info`; the text now appears only under `--log-level debug`. Existing journal entries are unaffected, so vacuum the journal if you want the history gone.
+
 ### Fixed
 
 - `dicta suspend` left an open type-mode session running. The `--unmute-to-dictate` watcher opened the session on unmute, suspending only stopped it from reacting to further mute events, and the mic button could no longer close what it had opened. The daemon then kept transcribing and typing until something else closed the session. Suspending now closes any type-mode session, whether the suspend is manual or triggered by the flap guard. Clip-mode sessions are not touched.

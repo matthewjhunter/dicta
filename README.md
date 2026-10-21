@@ -206,6 +206,12 @@ ExecStart=%h/.local/bin/dictad \
 Both `--audit-enabled` and `--audit-keep-audio` are required to capture
 audio. Both default off because both are sensitive by definition.
 
+Transcript text never reaches the journal at the default log level.
+`dictad` logs each utterance's length and timing at `info`; the text
+itself is logged only with `--log-level debug`, which is the right
+setting while diagnosing a misbehaving backend and the wrong one to
+leave on, since stderr goes to journald.
+
 ## Hotkey philosophy
 
 v1 ships exactly two compositor bindings (D17 in the design doc): Pause
