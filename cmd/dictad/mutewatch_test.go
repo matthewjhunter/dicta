@@ -12,30 +12,44 @@ import (
 	"github.com/matthewjhunter/dicta/internal/mute"
 )
 
-// fakeToggler records EnsureTypeOpen / CloseIfTypeOpen calls so a
-// test can assert how many transitions the watcher actually fired
-// and in what order.
+// fakeToggler models the session's type-mode open state the way the
+// real hooks do: EnsureTypeOpen is a no-op when already open and
+// CloseIfTypeOpen is a no-op when closed. opens/closes and sequence
+// record only effective transitions, so a test can assert what the
+// watcher actually did to the session. closeCalls counts every
+// CloseIfTypeOpen call, effective or not, for idempotency checks.
 type fakeToggler struct {
-	opens  atomic.Uint64
-	closes atomic.Uint64
+	opens      atomic.Uint64
+	closes     atomic.Uint64
+	closeCalls atomic.Uint64
 
 	mu       sync.Mutex
+	open     bool
 	sequence []string
 }
 
 func (f *fakeToggler) EnsureTypeOpen(_ context.Context) error {
-	f.opens.Add(1)
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.open {
+		return nil
+	}
+	f.open = true
+	f.opens.Add(1)
 	f.sequence = append(f.sequence, "open")
-	f.mu.Unlock()
 	return nil
 }
 
 func (f *fakeToggler) CloseIfTypeOpen(_ context.Context) error {
-	f.closes.Add(1)
+	f.closeCalls.Add(1)
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.open {
+		return nil
+	}
+	f.open = false
+	f.closes.Add(1)
 	f.sequence = append(f.sequence, "close")
-	f.mu.Unlock()
 	return nil
 }
 
@@ -387,5 +401,70 @@ func TestMuteWatcher_HandlesUnseededTransitionDefensively(t *testing.T) {
 	o, c, _ := tog.snapshot()
 	if o != 0 || c != 0 {
 		t.Errorf("unseeded transition should be treated as seed; got opens=%d closes=%d", o, c)
+	}
+}
+
+func TestMuteWatcher_SuspendClosesOpenTypeSession(t *testing.T) {
+	// Regression: the watcher opened a type-mode session on unmute, then
+	// `dicta suspend` landed. Suspending only stopped the watcher from
+	// acting on future mute events; it left the session it had opened
+	// running with no mute-driven way to close it. The daemon then sat
+	// in an open type-mode session typing everything the mic heard
+	// until shutdown. Suspend must close any type-mode session so the
+	// mic button's "off" position still means off.
+	tog, w, ch, stop := startWatcherCustom(t, testDebounce, nil)
+	defer stop()
+
+	ch <- initial(mute.Muted)
+	ch <- transition(mute.Unmuted)
+	settle(testDebounce)
+	if o, _, _ := tog.snapshot(); o != 1 {
+		t.Fatalf("precondition: unmute should have opened; got opens=%d", o)
+	}
+
+	w.Suspend("manual")
+
+	o, c, seq := tog.snapshot()
+	if o != 1 || c != 1 {
+		t.Errorf("Suspend must close the type session it opened; got opens=%d closes=%d seq=%v", o, c, seq)
+	}
+	if len(seq) != 2 || seq[1] != "close" {
+		t.Errorf("sequence = %v; want [open close]", seq)
+	}
+
+	// Idempotent: a second Suspend must not even attempt a close.
+	calls := tog.closeCalls.Load()
+	w.Suspend("manual")
+	if got := tog.closeCalls.Load(); got != calls {
+		t.Errorf("second Suspend called CloseIfTypeOpen again; calls=%d, want %d", got, calls)
+	}
+}
+
+func TestMuteWatcher_FlapAutoSuspendClosesOpenTypeSession(t *testing.T) {
+	// Same hazard via the flap guard: if the fire that trips the guard
+	// is an open, the watcher suspends itself with the session it just
+	// opened still running. Auto-suspend must close it too.
+	tog, w, ch, stop := startWatcherCustom(t, testDebounce, func(w *muteWatcher) {
+		w.SetFlapGuard(10*time.Second, 2)
+	})
+	defer stop()
+
+	ch <- initial(mute.Muted)
+	// open, close, open: the third fire exceeds threshold 2 and trips
+	// the guard with the session open.
+	for _, s := range []mute.State{mute.Unmuted, mute.Muted, mute.Unmuted} {
+		ch <- transition(s)
+		settle(testDebounce)
+	}
+
+	if susp, reason := w.Suspended(); !susp || reason != "flapping" {
+		t.Fatalf("precondition: Suspended()=%v,%q; want true,\"flapping\"", susp, reason)
+	}
+	o, c, seq := tog.snapshot()
+	if o != 2 || c != 2 {
+		t.Errorf("auto-suspend must close the open type session; got opens=%d closes=%d seq=%v", o, c, seq)
+	}
+	if n := len(seq); n == 0 || seq[n-1] != "close" {
+		t.Errorf("sequence = %v; want it to end with close", seq)
 	}
 }

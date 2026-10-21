@@ -75,11 +75,18 @@ type muteWatcher struct {
 
 	// mu guards the suspend state and the flap window, which are
 	// touched by Run (fire path), Suspend, and Resume from different
-	// goroutines.
+	// goroutines. Never held across a toggler call.
 	mu            sync.Mutex
 	suspended     bool
 	suspendReason string
 	fireTimes     []time.Time
+
+	// actMu serialises the check-suspended-then-act sequence in the
+	// fire path against Suspend. Without it a Suspend can land between
+	// fire's suspended check and its EnsureTypeOpen, close nothing,
+	// and then watch fire open a session that nothing will ever close.
+	// Held across toggler calls, so it is distinct from mu.
+	actMu sync.Mutex
 }
 
 // muteToggler is the narrow slice of session that the watcher needs.
@@ -118,16 +125,40 @@ func (w *muteWatcher) SetNotify(fn func(title, body string)) { w.notify = fn }
 func (w *muteWatcher) SetDevice(name string) { w.device = name }
 
 // Suspend stops the watcher from acting on mute transitions until
-// Resume is called. reason is recorded for status/logging ("manual",
-// "flapping"). Safe to call concurrently with Run. Idempotent.
+// Resume is called, and closes any type-mode session so the watcher
+// never leaves a session open that no mute event can close. reason is
+// recorded for status/logging ("manual", "flapping"). Safe to call
+// concurrently with Run. Idempotent: only the transition into the
+// suspended state closes the session.
+//
+// Suspend may block for up to one toggler call while the fire path
+// holds actMu.
 func (w *muteWatcher) Suspend(reason string) {
+	w.actMu.Lock()
+	defer w.actMu.Unlock()
 	w.mu.Lock()
 	already := w.suspended
 	w.suspended = true
 	w.suspendReason = reason
 	w.mu.Unlock()
-	if !already {
-		w.logger.Info("mutewatch: suspended", "reason", reason)
+	if already {
+		return
+	}
+	w.logger.Info("mutewatch: suspended", "reason", reason)
+	w.closeTypeOnSuspend()
+}
+
+// closeTypeOnSuspend closes a type-mode session, if one is open, as
+// part of entering the suspended state. A session the watcher opened
+// on unmute has no other way to close once mute events are ignored,
+// and the user's mental model is that suspended means off. Clip-mode
+// is untouched; CloseIfTypeOpen enforces that. Caller holds actMu.
+func (w *muteWatcher) closeTypeOnSuspend() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	w.logger.Info("mutewatch: closing type-mode on suspend")
+	if err := w.toggler.CloseIfTypeOpen(ctx); err != nil {
+		w.logger.Warn("mutewatch: CloseIfTypeOpen on suspend failed", "err", err)
 	}
 }
 
@@ -218,6 +249,10 @@ func (w *muteWatcher) Run(ctx context.Context, ch <-chan mute.Event) {
 		timerC = timer.C
 	}
 	fire := func(state mute.State) {
+		// actMu makes the suspended check and the toggler call one
+		// step with respect to Suspend; see the field comment.
+		w.actMu.Lock()
+		defer w.actMu.Unlock()
 		// Gate on suspend, re-checked here because a manual Suspend may
 		// land between arming the debounce timer and its expiry. Track
 		// lastState regardless so a later Resume sees the current state
@@ -245,6 +280,7 @@ func (w *muteWatcher) Run(ctx context.Context, ch <-chan mute.Event) {
 		if w.recordFireAndCheckFlap(w.now()) {
 			w.logger.Warn("mutewatch: auto-suspended after rapid mute flapping",
 				"device", w.device, "window", w.flapWindow, "threshold", w.flapThreshold)
+			w.closeTypeOnSuspend()
 			if w.notify != nil {
 				dev := w.device
 				if dev == "" {
