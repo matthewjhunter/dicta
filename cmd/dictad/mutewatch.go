@@ -87,6 +87,18 @@ type muteWatcher struct {
 	// and then watch fire open a session that nothing will ever close.
 	// Held across toggler calls, so it is distinct from mu.
 	actMu sync.Mutex
+
+	// absent is set while the capture device is gone (DeviceLost) and
+	// cleared when frames flow again (DeviceRestored). Guarded by mu.
+	// It is set synchronously so a debounce timer that expires after
+	// the loss finds it; devCh then tells Run to drop that timer.
+	absent bool
+
+	// devCh carries device-lost (true) / device-restored (false)
+	// signals from the audio goroutine to Run. Sends never block: the
+	// flag above is the state of record, the channel only prompts Run
+	// to tidy up.
+	devCh chan bool
 }
 
 // muteToggler is the narrow slice of session that the watcher needs.
@@ -106,6 +118,7 @@ func newMuteWatcher(logger *slog.Logger, toggler muteToggler, debounce time.Dura
 		flapWindow:    defaultFlapWindow,
 		flapThreshold: defaultFlapThreshold,
 		now:           time.Now,
+		devCh:         make(chan bool, 8),
 	}
 }
 
@@ -176,6 +189,57 @@ func (w *muteWatcher) Resume() {
 	if was {
 		w.logger.Info("mutewatch: resumed")
 	}
+}
+
+// DeviceLost records that the capture device has stopped delivering
+// frames. Any transition still inside its debounce window is dropped
+// and nothing fires until DeviceRestored. Closing a type-mode session
+// that the device can no longer feed is the session's job, driven by
+// the same capture-stall signal, so no toggler call happens here.
+// Safe to call from the audio goroutine: it never blocks.
+func (w *muteWatcher) DeviceLost() {
+	w.mu.Lock()
+	was := w.absent
+	w.absent = true
+	w.mu.Unlock()
+	if !was {
+		w.logger.Warn("mutewatch: capture device absent; ignoring mute state until it returns")
+	}
+	w.signalDevice(true)
+}
+
+// DeviceRestored records that frames are flowing again. The watcher
+// does not resume firing from its pre-loss state: the source is
+// expected to re-emit an Initial event for the returned device (see
+// pcmzero.Reseed), which seeds the watcher without firing it. Safe to
+// call from the audio goroutine: it never blocks.
+func (w *muteWatcher) DeviceRestored() {
+	w.mu.Lock()
+	was := w.absent
+	w.absent = false
+	w.mu.Unlock()
+	if was {
+		w.logger.Info("mutewatch: capture device back; waiting for its state to reseed")
+	}
+	w.signalDevice(false)
+}
+
+// signalDevice nudges Run without ever blocking the caller. A full
+// channel means Run already has enough pending nudges; the absent flag
+// is what Run consults.
+func (w *muteWatcher) signalDevice(lost bool) {
+	select {
+	case w.devCh <- lost:
+	default:
+	}
+}
+
+// Absent reports whether the capture device is currently gone. Safe to
+// call concurrently with Run.
+func (w *muteWatcher) Absent() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.absent
 }
 
 // Suspended reports whether the watcher is currently suspended and,
@@ -261,6 +325,11 @@ func (w *muteWatcher) Run(ctx context.Context, ch <-chan mute.Event) {
 			lastState = state
 			return
 		}
+		// Likewise for a device that went away after the timer was
+		// armed: its state on return will reseed us.
+		if w.Absent() {
+			return
+		}
 		lastState = state
 		w.fired.Add(1)
 		tCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -303,6 +372,13 @@ func (w *muteWatcher) Run(ctx context.Context, ch <-chan mute.Event) {
 			fired := pending
 			stopTimer()
 			fire(fired)
+		case lost := <-w.devCh:
+			// Device gone: whatever was pending is not a user action
+			// any more. Device back: nothing to do until the source
+			// reseeds us with an Initial event.
+			if lost {
+				stopTimer()
+			}
 		case ev, ok := <-ch:
 			if !ok {
 				stopTimer()
@@ -327,6 +403,14 @@ func (w *muteWatcher) Run(ctx context.Context, ch <-chan mute.Event) {
 				// Suspended (manually or by flap auto-suspend): track
 				// the current state so Resume does not synthesize a
 				// stale transition, but do not arm or fire.
+				lastState = ev.State
+				stopTimer()
+				continue
+			}
+			if w.Absent() {
+				// Device gone: a source that still reports (pipewire
+				// polling a stale id, say) is not describing a user
+				// action. Track and drop, as for suspended.
 				lastState = ev.State
 				stopTimer()
 				continue

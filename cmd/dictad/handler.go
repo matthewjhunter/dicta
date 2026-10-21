@@ -41,9 +41,12 @@ func (h *stubHandler) Status(ctx context.Context) (control.StatusInfo, error) {
 		info.ASR = h.asr.Snapshot()
 	}
 	if h.watcher != nil {
-		if susp, reason := h.watcher.Suspended(); susp {
+		switch susp, reason := h.watcher.Suspended(); {
+		case susp:
 			info.AutoActivation = "suspended (" + reason + ")"
-		} else {
+		case h.watcher.Absent():
+			info.AutoActivation = "device absent"
+		default:
 			info.AutoActivation = "active"
 		}
 	}
