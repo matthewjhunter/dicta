@@ -94,6 +94,28 @@ type session struct {
 	open  bool
 	epoch uint64
 
+	// toggleDebounce collapses a burst of Toggle calls into one press.
+	// A held Pause key under GNOME key repeat (or a cat on the key)
+	// delivers toggles tens of milliseconds apart; without this an
+	// even-length burst nets out to "nothing happened" and an odd one
+	// to a session the user did not mean to open. The window slides:
+	// every call, ignored or not, restamps lastToggle, so a key held
+	// longer than the window still counts as a single press. Zero
+	// disables. now is injectable for tests. Both guarded by mu.
+	toggleDebounce time.Duration
+	lastToggle     time.Time
+	now            func() time.Time
+
+	// idleTimeout closes a type-mode session that has heard no speech
+	// for this long. The open session is the type-mode safety boundary
+	// (D12), and an accidental open (held key, cat, unmute with nobody
+	// there) would otherwise stay open and type whatever the mic hears
+	// until something else closed it. NoteSpeech and OnUtterance
+	// restart the timer. Zero disables. Type-mode only: clip-mode has
+	// the panel as its boundary. idleTimer is guarded by mu.
+	idleTimeout time.Duration
+	idleTimer   *time.Timer
+
 	// typeQueue carries type-mode jobs to a single worker goroutine
 	// that dispatches them to ydotool in submission order. A mutex
 	// alone wouldn't suffice: asrMonitor.MaxConcurrent allows multiple
@@ -166,6 +188,7 @@ func newSession(logger *slog.Logger, typer dispatch.Typer, clipper dispatch.Clip
 		auditW:     auditW,
 		flushAudio: flushAudio,
 		daemonCtx:  daemonCtx,
+		now:        time.Now,
 	}
 	if preview != nil {
 		// When the panel exits on its own (after sending commit/cancel,
@@ -290,6 +313,74 @@ func (s *session) typeWorker() {
 	}
 }
 
+// SetToggleDebounce sets the window within which repeated Toggle
+// calls collapse into one press. Zero disables. Call before serving.
+func (s *session) SetToggleDebounce(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.toggleDebounce = d
+}
+
+// SetIdleTimeout sets how long a type-mode session may go without
+// speech before it closes itself. Zero disables. Call before serving.
+func (s *session) SetIdleTimeout(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.idleTimeout = d
+}
+
+// NoteSpeech restarts the idle timer. The audio monitor calls it when
+// the VAD enters speech; OnUtterance calls it too. A no-op when no
+// type-mode session is open or the timeout is disabled.
+func (s *session) NoteSpeech() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.open && s.mode == modeType && s.idleTimer != nil {
+		s.idleTimer.Reset(s.idleTimeout)
+	}
+}
+
+// armIdle starts the idle timer for the type-mode session identified
+// by epoch. Caller must NOT hold mu.
+func (s *session) armIdle(epoch uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.idleTimeout <= 0 {
+		return
+	}
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
+	}
+	s.idleTimer = time.AfterFunc(s.idleTimeout, func() { s.onIdle(epoch) })
+}
+
+// disarmIdle stops the idle timer. Caller must hold mu.
+func (s *session) disarmIdle() {
+	if s.idleTimer != nil {
+		s.idleTimer.Stop()
+		s.idleTimer = nil
+	}
+}
+
+// onIdle fires from the idle timer. It closes the session only if the
+// session that armed the timer is still the open one: a close and
+// reopen in the meantime bumped the epoch, and the newer session has
+// its own timer.
+func (s *session) onIdle(epoch uint64) {
+	s.mu.Lock()
+	stale := !s.open || s.mode != modeType || s.epoch != epoch
+	timeout := s.idleTimeout
+	s.mu.Unlock()
+	if stale {
+		return
+	}
+	s.logger.Info("session.idle: no speech within timeout, closing type-mode",
+		"timeout", timeout, "epoch", epoch)
+	if err := s.close(s.daemonCtx, "idle"); err != nil {
+		s.logger.Warn("session.idle: close failed", "err", err)
+	}
+}
+
 // Toggle implements the Pause/Scroll Lock semantics: if a session of
 // the requested mode is open, close it; otherwise close any active
 // session (D6) and open the requested mode.
@@ -303,6 +394,17 @@ func (s *session) Toggle(ctx context.Context, mode string) error {
 	}
 
 	s.mu.Lock()
+	if s.toggleDebounce > 0 {
+		t := s.now()
+		since := t.Sub(s.lastToggle)
+		s.lastToggle = t
+		if since < s.toggleDebounce {
+			s.mu.Unlock()
+			s.logger.Info("session.toggle ignored: repeat within debounce window",
+				"mode", mode, "since_ms", since.Milliseconds(), "debounce", s.toggleDebounce)
+			return nil
+		}
+	}
 	wasOpen := s.open
 	wasMode := s.mode
 	s.mu.Unlock()
@@ -412,6 +514,9 @@ func (s *session) open_(ctx context.Context, mode sessionMode) error {
 			s.logger.Warn("session.open: cue play failed", "err", err)
 		}
 	}
+	if mode == modeType {
+		s.armIdle(epoch)
+	}
 	return nil
 }
 
@@ -423,6 +528,7 @@ func (s *session) rollbackOpen() {
 	s.epoch++
 	s.mode = modeNone
 	s.open = false
+	s.disarmIdle()
 	s.mu.Unlock()
 	if err := s.syncAudio(); err != nil {
 		s.logger.Warn("session.open: stopping audio after failed open", "err", err)
@@ -467,6 +573,7 @@ func (s *session) close(ctx context.Context, reason string) error {
 	s.mu.Lock()
 	s.mode = modeNone
 	s.open = false
+	s.disarmIdle()
 	s.mu.Unlock()
 
 	// On-demand capture stops once the flush above has emitted the last
@@ -598,6 +705,7 @@ func (s *session) OnUtterance(pcm []byte) {
 	if !open || (mode != modeType && mode != modeClip) {
 		return
 	}
+	s.NoteSpeech()
 
 	// In type-mode, pre-allocate the typing job and enqueue it BEFORE
 	// submitting to the asrMonitor. This is what guarantees typing

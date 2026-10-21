@@ -1325,3 +1325,164 @@ func TestSession_AuditFailureDoesNotBreakDispatch(t *testing.T) {
 		t.Errorf("typer should have run despite audit failure; calls=%v", got)
 	}
 }
+
+// waitSessionClosed polls Snapshot until the session reports closed or
+// the deadline passes. Returns whether it closed.
+func waitSessionClosed(s *session, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if _, open := s.Snapshot(); !open {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, open := s.Snapshot()
+	return !open
+}
+
+func TestSession_ToggleDebounceCollapsesRepeatBurst(t *testing.T) {
+	// A Pause key held down (GNOME key repeat, or a cat on the key)
+	// delivers a burst of toggle commands tens of milliseconds apart.
+	// The burst must count as one press, and the window must slide so
+	// a key held for longer than the window still counts as one press.
+	s, _, cuer, _, _ := newTestSession(t)
+	now := time.Unix(1_700_000_000, 0)
+	s.now = func() time.Time { return now }
+	s.SetToggleDebounce(300 * time.Millisecond)
+
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatalf("first Toggle: %v", err)
+	}
+	// Twenty repeats at 60 ms spacing: 1.2 s of held key, every
+	// repeat inside 300 ms of the previous one.
+	for range 20 {
+		now = now.Add(60 * time.Millisecond)
+		if err := s.Toggle(t.Context(), "type"); err != nil {
+			t.Fatalf("repeat Toggle: %v", err)
+		}
+	}
+	if mode, open := s.Snapshot(); !open || mode != "type" {
+		t.Fatalf("after repeat burst: mode=%q open=%v; want type/true (burst must count as one press)", mode, open)
+	}
+
+	// A press after the window has elapsed is a real second press.
+	now = now.Add(400 * time.Millisecond)
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatalf("second real Toggle: %v", err)
+	}
+	if _, open := s.Snapshot(); open {
+		t.Errorf("after second real press: still open")
+	}
+	if played := cuer.Played(); len(played) != 2 {
+		t.Errorf("cues: got %v; want exactly [open close]", played)
+	}
+}
+
+func TestSession_ToggleDebounceOffByDefault(t *testing.T) {
+	s, _, _, _, _ := newTestSession(t)
+	for range 2 {
+		if err := s.Toggle(t.Context(), "type"); err != nil {
+			t.Fatalf("Toggle: %v", err)
+		}
+	}
+	if _, open := s.Snapshot(); open {
+		t.Errorf("two immediate toggles with no debounce should open then close; still open")
+	}
+}
+
+func TestSession_IdleTimeoutClosesTypeSession(t *testing.T) {
+	s, _, cuer, _, _ := newTestSession(t)
+	s.SetIdleTimeout(80 * time.Millisecond)
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatalf("Toggle: %v", err)
+	}
+	if !waitSessionClosed(s, time.Second) {
+		t.Fatalf("type session did not close after idle timeout")
+	}
+	if played := cuer.Played(); len(played) != 2 || played[1] != audio.CueClose {
+		t.Errorf("cues: got %v; want [open close]", played)
+	}
+}
+
+func TestSession_IdleTimeoutAppliesToUnmuteOpenedSession(t *testing.T) {
+	s, _, _, _, _ := newTestSession(t)
+	s.SetIdleTimeout(80 * time.Millisecond)
+	if err := s.EnsureTypeOpen(t.Context()); err != nil {
+		t.Fatalf("EnsureTypeOpen: %v", err)
+	}
+	if !waitSessionClosed(s, time.Second) {
+		t.Fatalf("unmute-opened type session did not close after idle timeout")
+	}
+}
+
+func TestSession_IdleTimeoutResetBySpeech(t *testing.T) {
+	s, _, _, _, _ := newTestSession(t)
+	s.SetIdleTimeout(250 * time.Millisecond)
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatalf("Toggle: %v", err)
+	}
+	// Speech starts at ~150 ms, before the first deadline; the timer
+	// must restart from there.
+	time.Sleep(150 * time.Millisecond)
+	s.NoteSpeech()
+	time.Sleep(150 * time.Millisecond) // t=300: past the original deadline
+	if _, open := s.Snapshot(); !open {
+		t.Fatalf("session closed at t~300ms despite speech at t~150ms")
+	}
+	if !waitSessionClosed(s, time.Second) {
+		t.Fatalf("session did not close once speech stopped")
+	}
+}
+
+func TestSession_IdleTimeoutResetByUtterance(t *testing.T) {
+	s, _, _, _, _ := newTestSession(t)
+	s.SetIdleTimeout(250 * time.Millisecond)
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatalf("Toggle: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	s.OnUtterance(make([]byte, 1280))
+	time.Sleep(150 * time.Millisecond)
+	if _, open := s.Snapshot(); !open {
+		t.Fatalf("session closed at t~300ms despite an utterance at t~150ms")
+	}
+	if !waitSessionClosed(s, time.Second) {
+		t.Fatalf("session did not close once utterances stopped")
+	}
+}
+
+func TestSession_IdleTimeoutDoesNotApplyToClipMode(t *testing.T) {
+	s, _, _, _ := newClipSession(t)
+	s.SetIdleTimeout(50 * time.Millisecond)
+	if err := s.Toggle(t.Context(), "clip"); err != nil {
+		t.Fatalf("Toggle clip: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if mode, open := s.Snapshot(); !open || mode != "clip" {
+		t.Errorf("clip session affected by idle timeout: mode=%q open=%v", mode, open)
+	}
+}
+
+func TestSession_IdleTimeoutFromOldSessionDoesNotCloseNewOne(t *testing.T) {
+	// Open, close by toggle, reopen quickly. The first session's idle
+	// timer must not fire into the second session.
+	s, _, _, _, _ := newTestSession(t)
+	s.SetIdleTimeout(150 * time.Millisecond)
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatalf("Toggle open: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatalf("Toggle close: %v", err)
+	}
+	if err := s.Toggle(t.Context(), "type"); err != nil {
+		t.Fatalf("Toggle reopen: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond) // t=200: first timer would have fired at 150
+	if _, open := s.Snapshot(); !open {
+		t.Fatalf("second session closed by the first session's idle timer")
+	}
+	if !waitSessionClosed(s, time.Second) {
+		t.Fatalf("second session never closed on its own idle timer")
+	}
+}

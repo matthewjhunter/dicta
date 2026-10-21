@@ -50,6 +50,12 @@ type audioMonitor struct {
 	// the asrMonitor's OnUtterance goroutine-spawns its work.
 	onUtterance func(pcm []byte)
 
+	// onSpeechStart is invoked once each time the VAD transitions from
+	// silence into speech, on the audio goroutine. The session uses it
+	// to restart its type-mode idle timer. Must be cheap and
+	// non-blocking.
+	onSpeechStart func()
+
 	// onFrame is invoked for every captured PCM frame, before VAD
 	// classification. Used by the mute watcher (unmute-to-dictate) to
 	// detect hardware mute via all-zero PCM. Must be cheap and
@@ -227,6 +233,9 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 					inUtterance = true
 					accumulator = accumulator[:0]
 					rawSpeechCount = 0
+					if m.onSpeechStart != nil {
+						m.onSpeechStart()
+					}
 				}
 				if energyVAD != nil && energyVAD.LastRawSpeech() {
 					rawSpeechCount++
