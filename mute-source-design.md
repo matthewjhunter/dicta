@@ -657,14 +657,28 @@ re-enumerates several devices produced a burst of these and tripped
 the flap guard.
 
 **Fix, capture side.** `internal/audio` starts `pw-record` with
-`-P '{ node.dont-fallback = true node.linger = true }'` whenever a
-device is named. `node.dont-fallback` forbids the relink;
+`-P '{ node.dont-fallback = true node.linger = true node.dont-move = true }'`
+whenever a device is named. `node.dont-fallback` forbids the relink;
 `node.linger` makes WirePlumber keep the stream waiting instead of
 sending the client an error and destroying the node. Verified on
 PipeWire 1.6 with a virtual source created and removed under a live
 `pw-record`: no bytes before the node exists, bytes while it does,
 none after removal, bytes again on recreation, no leftover stream
 node after exit. `pw-record` itself never has to be restarted.
+
+`node.dont-move` was added after the first live test. The virtual
+source was never the system default, so the test missed WirePlumber's
+`linking.follow-default-target` policy: when a stream's named target
+turns out to be the current default, the policy writes
+`target.node = -1` ("follow default") into the stream's metadata, and
+`find-defined-target.lua` lets metadata outrank the `target.object`
+property. After the hub reset the stream therefore had no defined
+target to wait for and sat parked with the MXL back and unlinked; the
+WirePlumber log read "waiting for defined target as dont-fallback is
+set". Clearing the metadata by hand linked it at once, which confirmed
+the diagnosis. `node.dont-move` makes the policy skip the metadata
+lookup, so the named target always wins. It also refuses
+pavucontrol-style moves, which is correct for this stream.
 
 **Fix, daemon side.** With the stream pinned, device absence shows up
 as a gap in the frame stream. The audio monitor runs a stall watchdog

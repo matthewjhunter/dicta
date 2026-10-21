@@ -15,7 +15,7 @@ Entries describe what changed for someone running or building dicta. The complet
 
 ### Changed
 
-- **A named `--audio-device` is captured exclusively.** The daemon used to let PipeWire relink its capture stream to the default source whenever the named node was missing, so a USB mic that was unplugged, or had not enumerated yet at startup, meant capture silently came from whatever other mic was around. The stream now links only to the named node, waits while it is absent, and resumes on its own when it returns. An empty `--audio-device` still follows the system default.
+- **A named `--audio-device` is captured exclusively.** The daemon used to let PipeWire relink its capture stream to the default source whenever the named node was missing, so a USB mic that was unplugged, or had not enumerated yet at startup, meant capture silently came from whatever other mic was around. The stream now links only to the named node, waits while it is absent, and resumes on its own when it returns, including when the named device is also the system default. The stream also refuses to be moved to another source from a mixer. An empty `--audio-device` still follows the system default.
 
 - **Transcript text is no longer logged at `info`.** `dictad` logs to stderr and systemd forwards that to journald, so every dictated phrase was landing in the system journal at the default level; with `--unmute-to-dictate`, so was anything the mic overheard while a session was open. The `asr.transcript` lines keep their timing, length and utterance id at `info`; the text now appears only under `--log-level debug`. Existing journal entries are unaffected, so vacuum the journal if you want the history gone.
 
