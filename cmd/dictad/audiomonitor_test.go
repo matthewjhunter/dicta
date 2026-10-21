@@ -488,3 +488,53 @@ func writeLoudPCM(path string) error {
 	}
 	return os.WriteFile(path, buf, 0o644)
 }
+
+func TestAudioMonitor_SpeechStartFiresOncePerUtterance(t *testing.T) {
+	// Loud frames, then enough silence for the VAD hangover, then loud
+	// again: onSpeechStart must fire exactly at each silence-to-speech
+	// transition, not on every speech frame.
+	cap := newFakeCapture()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mon := &audioMonitor{
+		cap:      cap,
+		vad:      audio.NewEnergyVAD(audio.VADConfig{Calibrate: 80 * time.Millisecond, Hangover: 160 * time.Millisecond}),
+		rb:       audio.NewRingBuffer(audio.CapacityForSeconds(5)),
+		log:      logger,
+		flushReq: make(chan chan struct{}, 1),
+	}
+	var starts atomic.Uint64
+	mon.onSpeechStart = func() { starts.Add(1) }
+	mon.onUtterance = func([]byte) {}
+
+	if err := mon.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	quiet := make([]byte, audio.FrameBytes)
+	burst := func() {
+		for range 10 {
+			cap.send(loudFrame(0.5))
+		}
+	}
+	rest := func() {
+		for range 10 { // 800 ms of silence, past the 160 ms hangover
+			cap.send(quiet)
+		}
+	}
+	for range 3 { // calibration: silence first
+		cap.send(quiet)
+	}
+	burst()
+	rest()
+	burst()
+	rest()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && mon.Snapshot().SpeechFrames < 20 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := mon.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if got := starts.Load(); got != 2 {
+		t.Errorf("onSpeechStart fired %d times; want 2 (once per utterance start), snapshot=%+v", got, mon.Snapshot())
+	}
+}

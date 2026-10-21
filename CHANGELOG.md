@@ -8,6 +8,8 @@ Entries describe what changed for someone running or building dicta. The complet
 
 ### Added
 
+- `--toggle-debounce` (default `300ms`) collapses a burst of toggle commands into one press. GNOME re-runs a custom shortcut's command for as long as the key is held, so a held Pause key was opening and closing the session every few tens of milliseconds. The window slides with each repeat, so a key held for any length of time is a single press. `0` disables.
+- `--type-idle-timeout` (default `15s`) closes a type-mode session that has heard no speech for that long. Speech restarts the clock. This applies to sessions opened by Pause and by `--unmute-to-dictate` alike, and leaves clip-mode alone. `0` disables.
 - `--log-level` (`debug`, `info`, `warn`, `error`; default `info`) sets `dictad`'s log verbosity.
 
 ### Changed

@@ -154,6 +154,12 @@ dictad` so the daemon auto-launches on first press. Re-run with
 `--uninstall` to remove. For Sway/Hyprland/KDE, bind in the compositor
 config (see [CONFIGURATION.md](CONFIGURATION.md)).
 
+A held key counts as one press: the daemon collapses toggles that
+arrive within `--toggle-debounce` (default 300 ms) of each other. And a
+type-mode session that hears nothing for `--type-idle-timeout` (default
+15 s) closes itself, so an accidental open cannot sit there typing. See
+[CONFIGURATION.md](CONFIGURATION.md).
+
 If you run `--unmute-to-dictate`, `dicta suspend` / `dicta resume` pause
 and re-enable auto-activation without killing the daemon -- handy before
 an audio call. Bind `dicta suspend` to a key if you want a one-keystroke

@@ -29,6 +29,13 @@ ExecStart=%h/.local/bin/dictad \
 |------|---------|--------------|
 | `--socket` | `$XDG_RUNTIME_DIR/dicta.sock` | Path the daemon listens on; mode `0600`, user-owned. The CLI uses the same default. |
 
+## Sessions
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `--toggle-debounce` | `300ms` | Toggle commands arriving within this window of the previous one are treated as repeats of the same press. The window slides, so a hotkey held down for any length of time counts as one press. GNOME re-runs a custom shortcut's command while the key is held, so without this a held Pause key (or a cat on it) opens and closes the session over and over. `0` disables. |
+| `--type-idle-timeout` | `15s` | A type-mode session that hears no speech for this long closes itself, with the usual close tone. Speech restarts the clock, so it never fires mid-dictation. This bounds the damage from an accidental open: a held key, an unmute with nobody at the desk. Applies to every type-mode session, including ones opened by `--unmute-to-dictate`. Clip-mode is unaffected, since nothing leaves the panel until Enter. `0` disables. |
+
 ## Audio
 
 | Flag | Default | What it does |
@@ -333,7 +340,10 @@ transcript text — `dicta status` is safe to run while screen-sharing.
 ## Logging
 
 Structured JSON to stdout (under systemd) or text to stderr (TTY).
-Levels DEBUG, INFO, WARN, ERROR (default INFO). Tail with:
+Levels DEBUG, INFO, WARN, ERROR, selected with `--log-level` (default
+INFO). Transcript text is logged only at DEBUG; INFO carries each
+utterance's timing and length without the content, because the
+daemon's stderr lands in journald. Tail with:
 
 ```sh
 journalctl --user -u dictad.service -f

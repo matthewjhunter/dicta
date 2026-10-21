@@ -76,6 +76,8 @@ func main() {
 	unmuteDebounceFlag := flag.Duration("unmute-to-dictate-debounce", 1*time.Second, "minimum duration a mute-state change must persist before the watcher fires a transition. Lower for snappier response, raise if you see spurious toggles.")
 	unmuteFlapWindowFlag := flag.Duration("unmute-flap-window", defaultFlapWindow, "sliding window for the unmute-to-dictate flap guard: if more than --unmute-flap-threshold transitions fire within this window, the watcher auto-suspends (a noise-gated non-dictation device would otherwise loop the mic-cue beep). Resume with `dicta resume`.")
 	unmuteFlapThresholdFlag := flag.Int("unmute-flap-threshold", defaultFlapThreshold, "transitions-per-window before the unmute-to-dictate flap guard auto-suspends. 0 disables the guard.")
+	toggleDebounceFlag := flag.Duration("toggle-debounce", 300*time.Millisecond, "collapse toggle_talk commands that arrive within this window of the previous one into a single press, so a held hotkey under compositor key repeat does not open and close the session repeatedly. The window slides with every repeat. 0 disables.")
+	typeIdleTimeoutFlag := flag.Duration("type-idle-timeout", 15*time.Second, "close a type-mode session that has heard no speech for this long, so an accidental open cannot keep typing whatever the mic hears. Speech restarts the clock. 0 disables. Clip-mode is unaffected.")
 	logLevelFlag := flag.String("log-level", "info", "log level: debug, info, warn, or error. Transcript text is logged only at debug; info carries timing and length metadata without the content.")
 	flag.Parse()
 
@@ -293,11 +295,15 @@ func main() {
 
 		sess = newSession(logger, typer, clipper, cuer, handler.asr, audioMon.VAD(), bus, preview, cleaner, auditW, audioMon.Flush, ctx)
 		audioMon.onUtterance = sess.OnUtterance
+		audioMon.onSpeechStart = sess.NoteSpeech
+		sess.SetToggleDebounce(*toggleDebounceFlag)
+		sess.SetIdleTimeout(*typeIdleTimeoutFlag)
 		if !*audioMonitorFlag {
 			sess.SetAudioLifecycle(audioMon.StartIfStopped, audioMon.Stop)
 		}
 		handler.session = sess
-		logger.Info("session orchestrator ready", "ydotool", *ydotoolBinaryFlag, "audio_cues", *audioCuesFlag)
+		logger.Info("session orchestrator ready", "ydotool", *ydotoolBinaryFlag, "audio_cues", *audioCuesFlag,
+			"toggle_debounce", *toggleDebounceFlag, "type_idle_timeout", *typeIdleTimeoutFlag)
 
 		// Unmute-to-dictate watcher. The feature itself is default-off
 		// (security posture, mute-source-design.md §3). When enabled,
