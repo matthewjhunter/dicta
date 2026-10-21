@@ -381,6 +381,30 @@ func (s *session) onIdle(epoch uint64) {
 	}
 }
 
+// OnCaptureLost is the audio monitor's stall hook: the capture device
+// has stopped delivering frames (unplugged, or a USB hub reset). An
+// open type-mode session has nothing left to hear, and if the mute
+// button opened it the button can no longer close it, so it closes
+// now with the usual close tone. Clip-mode stays open: nothing leaves
+// the panel until Enter, and the user may be mid-edit.
+//
+// Runs on the audio goroutine, so the close is handed to a goroutine:
+// close flushes the audio loop and would deadlock if called from it.
+func (s *session) OnCaptureLost() {
+	s.mu.Lock()
+	open := s.open && s.mode == modeType
+	s.mu.Unlock()
+	if !open {
+		return
+	}
+	s.logger.Warn("session.capture-lost: device gone, closing type-mode")
+	go func() {
+		if err := s.closeTypeIfOpen(s.daemonCtx, "device absent"); err != nil {
+			s.logger.Warn("session.capture-lost: close failed", "err", err)
+		}
+	}()
+}
+
 // Toggle implements the Pause/Scroll Lock semantics: if a session of
 // the requested mode is open, close it; otherwise close any active
 // session (D6) and open the requested mode.
@@ -444,6 +468,12 @@ func (s *session) EnsureTypeOpen(ctx context.Context) error {
 // currently open in type-mode. A clip-mode session is left alone (see
 // EnsureTypeOpen rationale); a closed session is a no-op.
 func (s *session) CloseIfTypeOpen(ctx context.Context) error {
+	return s.closeTypeIfOpen(ctx, "mute")
+}
+
+// closeTypeIfOpen closes an open type-mode session with the given log
+// reason and is a no-op otherwise. Clip-mode is never touched.
+func (s *session) closeTypeIfOpen(ctx context.Context, reason string) error {
 	s.mu.Lock()
 	open := s.open
 	mode := s.mode
@@ -451,7 +481,7 @@ func (s *session) CloseIfTypeOpen(ctx context.Context) error {
 	if !open || mode != modeType {
 		return nil
 	}
-	return s.close(ctx, "mute")
+	return s.close(ctx, reason)
 }
 
 // Snapshot returns the current mode/open pair for status replies.

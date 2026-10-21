@@ -63,6 +63,10 @@ type AudioStats struct {
 	SilenceFrames uint64 `json:"silence_frames"`
 	LastVADState  string `json:"last_vad_state,omitempty"` // "speech" | "silence"
 	NoiseFloor    string `json:"noise_floor,omitempty"`
+	// Stalled is true while capture is running but no frame has
+	// arrived within the daemon's stall timeout: the pinned device is
+	// unplugged or has not enumerated yet.
+	Stalled bool `json:"stalled,omitempty"`
 }
 
 // HealthUnchecked is the only value `dicta status` reports for

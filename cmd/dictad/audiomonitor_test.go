@@ -538,3 +538,113 @@ func TestAudioMonitor_SpeechStartFiresOncePerUtterance(t *testing.T) {
 		t.Errorf("onSpeechStart fired %d times; want 2 (once per utterance start), snapshot=%+v", got, mon.Snapshot())
 	}
 }
+
+// newStallTestMonitor builds a monitor over a hand-driven capture with
+// the stall watchdog set to timeout, and returns counters for the two
+// capture-state callbacks.
+func newStallTestMonitor(cap *fakeCapture, timeout time.Duration) (*audioMonitor, *atomic.Uint64, *atomic.Uint64) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mon := &audioMonitor{
+		cap:      cap,
+		vad:      audio.NewEnergyVAD(audio.VADConfig{Calibrate: 80 * time.Millisecond}),
+		rb:       audio.NewRingBuffer(audio.CapacityForSeconds(5)),
+		log:      logger,
+		flushReq: make(chan chan struct{}, 1),
+	}
+	mon.SetStallTimeout(timeout)
+	var lost, restored atomic.Uint64
+	mon.onCaptureLost = func() { lost.Add(1) }
+	mon.onCaptureRestored = func() { restored.Add(1) }
+	return mon, &lost, &restored
+}
+
+func waitCount(c *atomic.Uint64, want uint64, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if c.Load() >= want {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return c.Load() >= want
+}
+
+func TestAudioMonitor_StallFiresOnceAndRecoversOnNextFrame(t *testing.T) {
+	// A pinned pw-record keeps running but goes silent when its node
+	// vanishes (USB mic unplugged, hub knocked). The monitor must turn
+	// that gap into one onCaptureLost, report it in Snapshot, and fire
+	// one onCaptureRestored when frames resume.
+	cap := newFakeCapture()
+	mon, lost, restored := newStallTestMonitor(cap, 60*time.Millisecond)
+	if err := mon.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = mon.Stop() }()
+	quiet := make([]byte, audio.FrameBytes)
+
+	// Steady frames well inside the timeout: no stall.
+	for range 5 {
+		cap.send(quiet)
+		time.Sleep(20 * time.Millisecond)
+	}
+	if lost.Load() != 0 || mon.Snapshot().Stalled {
+		t.Fatalf("stall reported while frames were flowing: lost=%d snapshot=%+v", lost.Load(), mon.Snapshot())
+	}
+
+	// Frames stop: exactly one lost callback, even well past the timeout.
+	if !waitCount(lost, 1, time.Second) {
+		t.Fatalf("onCaptureLost did not fire after frames stopped")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := lost.Load(); got != 1 {
+		t.Errorf("onCaptureLost fired %d times during one stall; want 1", got)
+	}
+	if !mon.Snapshot().Stalled {
+		t.Errorf("Snapshot.Stalled=false during stall")
+	}
+	if restored.Load() != 0 {
+		t.Errorf("onCaptureRestored fired before frames resumed")
+	}
+
+	// Frames resume: one restored callback, stall flag clears.
+	cap.send(quiet)
+	if !waitCount(restored, 1, time.Second) {
+		t.Fatalf("onCaptureRestored did not fire after frames resumed")
+	}
+	if mon.Snapshot().Stalled {
+		t.Errorf("Snapshot.Stalled=true after frames resumed")
+	}
+
+	// A second gap is a second, separate loss.
+	if !waitCount(lost, 2, time.Second) {
+		t.Fatalf("second stall not reported; lost=%d", lost.Load())
+	}
+}
+
+func TestAudioMonitor_StallBeforeFirstFrame(t *testing.T) {
+	// The daemon can start before the USB mic has enumerated. The
+	// watchdog arms at Start, so an absent device is reported without
+	// waiting for a frame that never comes.
+	cap := newFakeCapture()
+	mon, lost, _ := newStallTestMonitor(cap, 40*time.Millisecond)
+	if err := mon.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = mon.Stop() }()
+	if !waitCount(lost, 1, time.Second) {
+		t.Fatalf("onCaptureLost did not fire for a capture that never produced a frame")
+	}
+}
+
+func TestAudioMonitor_StallTimeoutZeroDisables(t *testing.T) {
+	cap := newFakeCapture()
+	mon, lost, _ := newStallTestMonitor(cap, 0)
+	if err := mon.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = mon.Stop() }()
+	time.Sleep(100 * time.Millisecond)
+	if lost.Load() != 0 || mon.Snapshot().Stalled {
+		t.Errorf("stall reported with watchdog disabled: lost=%d snapshot=%+v", lost.Load(), mon.Snapshot())
+	}
+}

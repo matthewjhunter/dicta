@@ -91,6 +91,19 @@ func (s *Source) Watch(ctx context.Context) (<-chan mute.Event, error) {
 	return s.out, nil
 }
 
+// Reseed forgets the last observed state, so the next frame is
+// reported as an Initial event rather than compared against history.
+// Call it when the capture device goes away: whatever state the device
+// returns in is where it is, not something the user did, and an
+// Initial seeds the watcher without firing it. Safe to call at any
+// time, including before Watch and while no device is delivering
+// frames.
+func (s *Source) Reseed() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastSet = false
+}
+
 // OnFrame is the audio-pump frame hook. It is cheap (a byte scan
 // over a typically-2560-byte frame) and non-blocking — events are
 // only emitted on state transitions.

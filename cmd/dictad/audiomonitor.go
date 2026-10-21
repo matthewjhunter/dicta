@@ -62,6 +62,18 @@ type audioMonitor struct {
 	// non-blocking — runs on the audio pump goroutine.
 	onFrame func(pcm []byte)
 
+	// onCaptureLost is invoked once when no frame has arrived for
+	// stallTimeout, and onCaptureRestored once when frames resume
+	// after that. A pinned pw-record stays alive but silent while its
+	// node is absent, so a stall is how the daemon learns the mic is
+	// gone. Both run on the audio goroutine and must not block.
+	onCaptureLost     func()
+	onCaptureRestored func()
+
+	// stallTimeout is the frame gap that counts as a stalled capture.
+	// Zero disables the watchdog.
+	stallTimeout time.Duration
+
 	// flushReq lets external callers (specifically session.close) ask
 	// the audio loop to force-emit whatever it has accumulated so far,
 	// even if the VAD hasn't seen enough silence to declare end-of-
@@ -83,6 +95,7 @@ type audioMonitor struct {
 	backend       atomic.Value // string
 	lastSpeech    atomic.Bool
 	noiseFloor    atomic.Uint64 // math.Float64bits of current EnergyVAD floor
+	stalled       atomic.Bool
 
 	mu         sync.Mutex
 	stop       context.CancelFunc
@@ -114,6 +127,13 @@ func (m *audioMonitor) SetMaxUtterance(bytes int) { m.maxUtteranceBytes = bytes 
 // silently no-ops.
 func (m *audioMonitor) SetMinRawSpeechFrames(n int) { m.minRawSpeechFrames = n }
 
+// SetStallTimeout sets how long capture may go without a frame before
+// it is reported stalled via onCaptureLost and Snapshot. Frames arrive
+// every 80 ms in normal operation, so anything over a few hundred
+// milliseconds means the stream has no source. Zero disables the
+// watchdog. Call before Start.
+func (m *audioMonitor) SetStallTimeout(d time.Duration) { m.stallTimeout = d }
+
 // Start spawns capture and the VAD-update goroutine. It returns
 // immediately; Stop is required to release the subprocess.
 func (m *audioMonitor) Start(ctx context.Context) error {
@@ -130,12 +150,13 @@ func (m *audioMonitor) Start(ctx context.Context) error {
 		return err
 	}
 
+	done := make(chan struct{})
 	m.stop = cancel
-	m.doneSignal = make(chan struct{})
+	m.doneSignal = done
 	m.running.Store(true)
 	m.backend.Store(m.cap.Backend())
 
-	go m.loop(frames)
+	go m.loop(frames, done)
 	return nil
 }
 
@@ -171,11 +192,16 @@ func (m *audioMonitor) Stop() error {
 		m.log.Warn("audio.stop", "err", err)
 	}
 	m.running.Store(false)
+	m.stalled.Store(false)
 	return nil
 }
 
-func (m *audioMonitor) loop(frames <-chan audio.Frame) {
-	defer close(m.doneSignal)
+// loop is the capture goroutine. done is handed in rather than read
+// from the struct: Stop clears the field under the lock, and a Stop
+// that lands before the goroutine has read it would close a nil
+// channel.
+func (m *audioMonitor) loop(frames <-chan audio.Frame, done chan<- struct{}) {
+	defer close(done)
 	energyVAD, _ := m.vad.(*audio.EnergyVAD)
 
 	var (
@@ -209,8 +235,31 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 		inUtterance = false
 	}
 
+	// Stall watchdog: armed at start so a device that is absent before
+	// the first frame is reported too, re-armed on every frame, and
+	// disarmed (stallC = nil) once it fires so a long gap reports once.
+	var (
+		stall   *time.Timer
+		stallC  <-chan time.Time
+		stalled bool
+	)
+	if m.stallTimeout > 0 {
+		stall = time.NewTimer(m.stallTimeout)
+		stallC = stall.C
+		defer stall.Stop()
+	}
+
 	for {
 		select {
+		case <-stallC:
+			stallC = nil
+			stalled = true
+			m.stalled.Store(true)
+			m.log.Warn("audio.capture stalled: no frames from the capture device",
+				"timeout", m.stallTimeout)
+			if m.onCaptureLost != nil {
+				m.onCaptureLost()
+			}
 		case done := <-m.flushReq:
 			// Forced finalization (session.close path): flush whatever
 			// the accumulator holds without waiting for VAD hangover.
@@ -219,6 +268,18 @@ func (m *audioMonitor) loop(frames <-chan audio.Frame) {
 		case f, ok := <-frames:
 			if !ok {
 				return
+			}
+			if stall != nil {
+				stall.Reset(m.stallTimeout)
+				stallC = stall.C
+			}
+			if stalled {
+				stalled = false
+				m.stalled.Store(false)
+				m.log.Info("audio.capture resumed: frames flowing again")
+				if m.onCaptureRestored != nil {
+					m.onCaptureRestored()
+				}
 			}
 			m.rb.Push(f)
 			m.frames.Add(1)
@@ -367,6 +428,7 @@ func (m *audioMonitor) Snapshot() control.AudioStats {
 		SpeechFrames:  m.speechFrames.Load(),
 		SilenceFrames: m.silenceFrames.Load(),
 		LastVADState:  state,
+		Stalled:       m.stalled.Load(),
 	}
 	if floorBits := m.noiseFloor.Load(); floorBits != 0 {
 		out.NoiseFloor = fmt.Sprintf("%.6f", math.Float64frombits(floorBits))

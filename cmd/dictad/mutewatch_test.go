@@ -468,3 +468,116 @@ func TestMuteWatcher_FlapAutoSuspendClosesOpenTypeSession(t *testing.T) {
 		t.Errorf("sequence = %v; want it to end with close", seq)
 	}
 }
+
+// Device absence. The capture device vanishing (USB mic unplugged, hub
+// knocked) is not a mute action. While the device is absent the
+// watcher must not fire, a transition still inside its debounce window
+// must be dropped, and the device's state on return must seed rather
+// than fire. Closing the open session is the session's job, driven by
+// the same capture-stall signal, so the watcher only has to get out of
+// the way.
+
+func TestMuteWatcher_DeviceLostDropsPendingTransition(t *testing.T) {
+	tog, w, ch, stop := startWatcherCustom(t, 100*time.Millisecond, nil)
+	defer stop()
+
+	ch <- initial(mute.Muted)
+	ch <- transition(mute.Unmuted) // would open after 100 ms
+	time.Sleep(20 * time.Millisecond)
+	w.DeviceLost()
+	settle(100 * time.Millisecond)
+
+	if o, c, seq := tog.snapshot(); o != 0 || c != 0 {
+		t.Errorf("pending transition fired across device loss: opens=%d closes=%d seq=%v", o, c, seq)
+	}
+	if !w.Absent() {
+		t.Errorf("Absent() = false after DeviceLost")
+	}
+}
+
+func TestMuteWatcher_EventsWhileAbsentDoNotFire(t *testing.T) {
+	tog, w, ch, stop := startWatcherCustom(t, testDebounce, nil)
+	defer stop()
+
+	ch <- initial(mute.Muted)
+	w.DeviceLost()
+	settle(testDebounce)
+	ch <- transition(mute.Unmuted)
+	settle(testDebounce)
+
+	if o, _, seq := tog.snapshot(); o != 0 {
+		t.Errorf("fired while device absent: opens=%d seq=%v", o, seq)
+	}
+}
+
+func TestMuteWatcher_DeviceRestoredSeedsFromInitialThenFiresNormally(t *testing.T) {
+	tog, w, ch, stop := startWatcherCustom(t, testDebounce, nil)
+	defer stop()
+
+	ch <- initial(mute.Muted)
+	w.DeviceLost()
+	settle(testDebounce)
+	w.DeviceRestored()
+	if w.Absent() {
+		t.Fatalf("Absent() = true after DeviceRestored")
+	}
+
+	// The device came back unmuted. The source re-emits that as an
+	// Initial (pcm-zero after Reseed); the watcher must seed, not open.
+	ch <- initial(mute.Unmuted)
+	settle(testDebounce)
+	if o, _, seq := tog.snapshot(); o != 0 {
+		t.Errorf("returned device's state opened a session: opens=%d seq=%v", o, seq)
+	}
+
+	// From here on the user's real actions fire as usual.
+	ch <- transition(mute.Muted)
+	settle(testDebounce)
+	ch <- transition(mute.Unmuted)
+	settle(testDebounce)
+	if o, _, seq := tog.snapshot(); o != 1 {
+		t.Errorf("real unmute after restore did not open: opens=%d seq=%v", o, seq)
+	}
+}
+
+func TestMuteWatcher_DeviceFlapDoesNotTripFlapGuard(t *testing.T) {
+	// A hub being knocked produces a burst of lost/restored cycles.
+	// None of them are fires, so the flap guard must stay quiet and
+	// the watcher must still work afterwards.
+	tog, w, ch, stop := startWatcherCustom(t, testDebounce, func(w *muteWatcher) {
+		w.SetFlapGuard(10*time.Second, 2)
+	})
+	defer stop()
+
+	ch <- initial(mute.Muted)
+	for range 5 {
+		w.DeviceLost()
+		w.DeviceRestored()
+		ch <- initial(mute.Muted)
+	}
+	settle(testDebounce)
+	if susp, reason := w.Suspended(); susp {
+		t.Fatalf("device flapping tripped the flap guard: suspended (%s)", reason)
+	}
+
+	ch <- transition(mute.Unmuted)
+	settle(testDebounce)
+	if o, _, seq := tog.snapshot(); o != 1 {
+		t.Errorf("unmute after device flapping did not open: opens=%d seq=%v", o, seq)
+	}
+}
+
+func TestMuteWatcher_DeviceLostIsIdempotent(t *testing.T) {
+	_, w, ch, stop := startWatcherCustom(t, testDebounce, nil)
+	defer stop()
+	ch <- initial(mute.Muted)
+	for range 10 {
+		w.DeviceLost() // must never block, however many arrive unread
+	}
+	w.DeviceRestored()
+	w.DeviceRestored()
+	settle(testDebounce)
+	if w.Absent() {
+		t.Errorf("Absent() = true after DeviceRestored")
+	}
+}

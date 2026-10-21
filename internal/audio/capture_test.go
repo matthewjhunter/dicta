@@ -105,6 +105,34 @@ func TestPipewireArgs_Shape(t *testing.T) {
 	}
 }
 
+// TestPipewireArgs_PinnedDeviceNeverFallsBack covers the properties
+// that keep a named capture target honest. Without them WirePlumber
+// relinks the stream to the default source whenever the named node is
+// missing (unplugged, or not enumerated yet at startup), so a daemon
+// pinned to one mic would silently capture from another. With
+// node.dont-fallback the stream only ever links to the named node, and
+// node.linger makes it wait for that node instead of erroring out.
+func TestPipewireArgs_PinnedDeviceNeverFallsBack(t *testing.T) {
+	args := pipewireArgs(CaptureConfig{Device: "alsa_input.usb"})
+	i := slices.Index(args, "-P")
+	if i < 0 || i+1 >= len(args) {
+		t.Fatalf("expected -P <properties> for a pinned device, got %v", args)
+	}
+	props := args[i+1]
+	for _, want := range []string{"node.dont-fallback = true", "node.linger = true"} {
+		if !strings.Contains(props, want) {
+			t.Errorf("properties %q missing %q", props, want)
+		}
+	}
+
+	// Empty device follows the system default, so it must keep the
+	// stock relink-to-default behaviour: no properties at all.
+	args = pipewireArgs(CaptureConfig{})
+	if slices.Contains(args, "-P") {
+		t.Errorf("expected no -P with empty device, got %v", args)
+	}
+}
+
 func TestPulseArgs_Shape(t *testing.T) {
 	args := pulseArgs(CaptureConfig{Device: "alsa_input.usb", BufferMS: 50})
 	must := []string{"--rate=16000", "--channels=1", "--format=s16le", "--raw",

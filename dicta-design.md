@@ -220,11 +220,20 @@ surface.
      so this code stores names only.
   2. `[audio].device` in the user config file, if non-empty.
   3. PipeWire's current default source (the `device = ""` case).
-- If the selected device is missing at session start, the daemon logs
-  `WARN dicta.audio.device-missing name=...` and falls back to the
-  system default. The daemon stays healthy; the audit log records the
-  device actually used. This is the right shape for a user-session
-  daemon -- hard-failing on a missing USB headset would be hostile.
+- A named device is captured exclusively (revised 2026-10-21; the
+  original text had the daemon fall back to the system default when
+  the named device was missing). The `pw-record` stream is started
+  with `node.dont-fallback=true node.linger=true`, so WirePlumber
+  links it only to the named node, leaves it waiting while that node
+  is absent, and links it again when the node returns. The daemon
+  stays healthy throughout: a missing USB mic at startup or mid-
+  session produces a frame stall, which the audio monitor reports
+  (`--capture-stall-timeout`, default 1 s) and which closes any open
+  type-mode session. The fall-back behaviour was dropped because it
+  made "capture from the MXL" mean "capture from whatever is plugged
+  in" the moment the mic was unplugged, which is exactly wrong for a
+  daemon that opens sessions on mute state (D18). An empty device
+  still follows the system default.
 - Hot-plug re-routing while a session is open is **not** in v1: the
   daemon captures from whichever node was current at session start.
   If the user changes their default mid-session, the change takes

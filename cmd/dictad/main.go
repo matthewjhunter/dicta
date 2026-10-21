@@ -33,7 +33,8 @@ func main() {
 	socketFlag := flag.String("socket", "", "control socket path (default: $XDG_RUNTIME_DIR/dicta.sock)")
 	audioMonitorFlag := flag.Bool("audio-monitor", false, "capture audio continuously instead of only while a session is open: exposes idle VAD stats via `dicta status`, and is required by the pcm-zero/auto unmute sources")
 	audioBackendFlag := flag.String("audio-backend", "auto", "audio capture backend: pipewire | pulse | auto")
-	audioDeviceFlag := flag.String("audio-device", "", "audio source name (PipeWire node or pulse source); empty = system default")
+	audioDeviceFlag := flag.String("audio-device", "", "audio source name (PipeWire node or pulse source); empty = system default. A named PipeWire device is captured exclusively: if it is unplugged or not yet enumerated, capture waits for it rather than falling back to the default source.")
+	captureStallTimeoutFlag := flag.Duration("capture-stall-timeout", time.Second, "report the capture device absent when no audio frame has arrived for this long (frames normally arrive every 80 ms). An open type-mode session closes, and --unmute-to-dictate ignores mute state until frames resume. 0 disables.")
 	asrBackendFlag := flag.String("asr-backend", "", "asr backend: wyoming | whispercpp | openai (empty = disabled)")
 	asrAddrFlag := flag.String("asr-wyoming-addr", "tcp://localhost:10300", "wyoming server address (host:port or tcp://host:port)")
 	whisperBinaryFlag := flag.String("whispercpp-binary", "/usr/local/bin/whisper-server", "whisper-server binary path (whispercpp backend)")
@@ -129,6 +130,7 @@ func main() {
 			frames := max(int(*vadMinSpeechMSFlag/audio.FrameDuration), 1)
 			audioMon.SetMinRawSpeechFrames(frames)
 		}
+		audioMon.SetStallTimeout(*captureStallTimeoutFlag)
 	}
 
 	if *asrBackendFlag != "" {
@@ -296,6 +298,7 @@ func main() {
 		sess = newSession(logger, typer, clipper, cuer, handler.asr, audioMon.VAD(), bus, preview, cleaner, auditW, audioMon.Flush, ctx)
 		audioMon.onUtterance = sess.OnUtterance
 		audioMon.onSpeechStart = sess.NoteSpeech
+		audioMon.onCaptureLost = sess.OnCaptureLost
 		sess.SetToggleDebounce(*toggleDebounceFlag)
 		sess.SetIdleTimeout(*typeIdleTimeoutFlag)
 		if !*audioMonitorFlag {
@@ -303,7 +306,8 @@ func main() {
 		}
 		handler.session = sess
 		logger.Info("session orchestrator ready", "ydotool", *ydotoolBinaryFlag, "audio_cues", *audioCuesFlag,
-			"toggle_debounce", *toggleDebounceFlag, "type_idle_timeout", *typeIdleTimeoutFlag)
+			"toggle_debounce", *toggleDebounceFlag, "type_idle_timeout", *typeIdleTimeoutFlag,
+			"capture_stall_timeout", *captureStallTimeoutFlag)
 
 		// Unmute-to-dictate watcher. The feature itself is default-off
 		// (security posture, mute-source-design.md §3). When enabled,
@@ -321,7 +325,7 @@ func main() {
 			if *audioMonitorFlag {
 				continuousPump = audioMon
 			}
-			src, err := buildMuteSource(*unmuteSourceFlag, logger, continuousPump, *audioDeviceFlag)
+			src, reseed, err := buildMuteSource(*unmuteSourceFlag, logger, continuousPump, *audioDeviceFlag)
 			if err != nil {
 				logger.Error("unmute-to-dictate: build source", "err", err, "source", *unmuteSourceFlag)
 				os.Exit(1)
@@ -336,6 +340,18 @@ func main() {
 			watcher.SetDevice(*audioDeviceFlag)
 			watcher.SetNotify(dispatch.DefaultNotify)
 			handler.watcher = watcher
+			// A capture stall means the device is gone, not that the
+			// user touched the mute button. Forget the source's last
+			// observation so the returning device reseeds the watcher,
+			// stand the watcher down, then close the session it can no
+			// longer feed. All three are non-blocking; they run on the
+			// audio goroutine.
+			audioMon.onCaptureLost = func() {
+				reseed()
+				watcher.DeviceLost()
+				sess.OnCaptureLost()
+			}
+			audioMon.onCaptureRestored = watcher.DeviceRestored
 			go watcher.Run(ctx, ch)
 			logger.Info("unmute-to-dictate enabled",
 				"source", src.Name(),

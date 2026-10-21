@@ -11,13 +11,17 @@ Entries describe what changed for someone running or building dicta. The complet
 - `--toggle-debounce` (default `300ms`) collapses a burst of toggle commands into one press. GNOME re-runs a custom shortcut's command for as long as the key is held, so a held Pause key was opening and closing the session every few tens of milliseconds. The window slides with each repeat, so a key held for any length of time is a single press. `0` disables.
 - `--type-idle-timeout` (default `15s`) closes a type-mode session that has heard no speech for that long. Speech restarts the clock. This applies to sessions opened by Pause and by `--unmute-to-dictate` alike, and leaves clip-mode alone. `0` disables.
 - `--log-level` (`debug`, `info`, `warn`, `error`; default `info`) sets `dictad`'s log verbosity.
+- `--capture-stall-timeout` (default `1s`) reports the capture device absent when no audio frame has arrived for that long. `dicta status` shows it as `audio.stalled: true` and, with `--unmute-to-dictate`, `auto_activation: device absent`. `0` disables.
 
 ### Changed
+
+- **A named `--audio-device` is captured exclusively.** The daemon used to let PipeWire relink its capture stream to the default source whenever the named node was missing, so a USB mic that was unplugged, or had not enumerated yet at startup, meant capture silently came from whatever other mic was around. The stream now links only to the named node, waits while it is absent, and resumes on its own when it returns. An empty `--audio-device` still follows the system default.
 
 - **Transcript text is no longer logged at `info`.** `dictad` logs to stderr and systemd forwards that to journald, so every dictated phrase was landing in the system journal at the default level; with `--unmute-to-dictate`, so was anything the mic overheard while a session was open. The `asr.transcript` lines keep their timing, length and utterance id at `info`; the text now appears only under `--log-level debug`. Existing journal entries are unaffected, so vacuum the journal if you want the history gone.
 
 ### Fixed
 
+- Unplugging and replugging the mic, or a USB hub reset that takes the mic with it, read as mute-button presses. With the stream relinked to another mic the `pcm-zero` source saw real audio and opened a session on it; the returning mic's power-up state then counted as a further transition. A capture stall now closes any open type-mode session, the `--unmute-to-dictate` watcher ignores mute state until frames resume, and the returning device's state seeds the watcher instead of firing it. Clip-mode sessions are left open.
 - `dicta suspend` left an open type-mode session running. The `--unmute-to-dictate` watcher opened the session on unmute, suspending only stopped it from reacting to further mute events, and the mic button could no longer close what it had opened. The daemon then kept transcribing and typing until something else closed the session. Suspending now closes any type-mode session, whether the suspend is manual or triggered by the flap guard. Clip-mode sessions are not touched.
 
 ## [0.1.3] - 2026-09-20

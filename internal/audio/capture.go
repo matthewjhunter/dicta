@@ -218,6 +218,11 @@ func (c *SubprocessCapture) resolveCommand() (backend, exe string, args []string
 	return backend, exe, args, nil
 }
 
+// pinnedTargetProps is the pw-record stream property set for a named
+// capture target. SPA-JSON dict syntax, as pw-cat's -P flag expects. A
+// constant rather than built from config, so no user value reaches it.
+const pinnedTargetProps = "{ node.dont-fallback = true node.linger = true }"
+
 // pipewireArgs builds argv for pw-record. Format flags align with D15.
 func pipewireArgs(cfg CaptureConfig) []string {
 	args := []string{
@@ -227,6 +232,18 @@ func pipewireArgs(cfg CaptureConfig) []string {
 	}
 	if cfg.Device != "" {
 		args = append(args, "--target="+cfg.Device)
+		// A named target must mean that node and nothing else.
+		// WirePlumber's stock policy relinks a stream to the default
+		// source whenever its named target is missing, which turns
+		// "capture from the MXL" into "capture from whatever is
+		// plugged in" the moment the mic is unplugged or has not
+		// enumerated yet at startup. node.dont-fallback forbids that
+		// relink, and node.linger makes the stream wait for the
+		// target rather than fail: pw-record stays up, produces no
+		// frames while the node is absent, and resumes by itself
+		// when it returns. The audio monitor turns that gap into a
+		// capture-stall signal. Verified against PipeWire 1.6.
+		args = append(args, "-P", pinnedTargetProps)
 	}
 	// pw-record writes WAV by default unless we point it at "-" with raw
 	// flags. The empty file-name positional makes it write to stdout, and

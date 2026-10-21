@@ -55,3 +55,26 @@ func TestHandler_StatusReportsAutoActivation(t *testing.T) {
 		t.Errorf("suspended watcher: AutoActivation=%q, want \"suspended (manual)\"", info.AutoActivation)
 	}
 }
+
+func TestHandler_StatusReportsDeviceAbsent(t *testing.T) {
+	w := newMuteWatcher(discardWatcherLogger(), &fakeToggler{}, testDebounce)
+	h := &stubHandler{version: "test", watcher: w}
+
+	w.DeviceLost()
+	if info, _ := h.Status(t.Context()); info.AutoActivation != "device absent" {
+		t.Errorf("absent device: AutoActivation=%q, want \"device absent\"", info.AutoActivation)
+	}
+
+	// A suspend is the user's sticky choice and is reported over the
+	// transient device state.
+	w.Suspend("manual")
+	if info, _ := h.Status(t.Context()); info.AutoActivation != "suspended (manual)" {
+		t.Errorf("suspended and absent: AutoActivation=%q, want \"suspended (manual)\"", info.AutoActivation)
+	}
+
+	w.Resume()
+	w.DeviceRestored()
+	if info, _ := h.Status(t.Context()); info.AutoActivation != "active" {
+		t.Errorf("restored: AutoActivation=%q, want \"active\"", info.AutoActivation)
+	}
+}
