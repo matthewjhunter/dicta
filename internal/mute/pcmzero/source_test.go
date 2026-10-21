@@ -189,3 +189,63 @@ func TestSource_ChannelClosesOnCancel(t *testing.T) {
 		t.Errorf("channel did not close within 1s of cancel")
 	}
 }
+
+func TestSource_ReseedMakesNextFrameInitial(t *testing.T) {
+	// When the capture device goes away and comes back, the first
+	// frame from the returned device is not a user action, whatever
+	// its mute state. Reseed forgets the last observation so that frame
+	// is reported as Initial (seeds the watcher) instead of as a
+	// transition (fires it).
+	src := NewSource(discardLogger())
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	ch, err := src.Watch(ctx)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+
+	src.OnFrame(zeroFrame(2560)) // seed muted
+	if first := waitEvent(t, ch); !first.Initial {
+		t.Fatalf("expected Initial event, got %+v", first)
+	}
+
+	// Device returns unmuted: a changed state, but reseeded.
+	src.Reseed()
+	src.OnFrame(nonzeroFrame(2560))
+	ev := waitEvent(t, ch)
+	if !ev.Initial || ev.State != mute.Unmuted {
+		t.Errorf("after Reseed, event = %+v; want Initial=true State=unmuted", ev)
+	}
+
+	// Device returns in the same state: still an Initial, so the
+	// watcher's view is re-established either way.
+	src.Reseed()
+	src.OnFrame(nonzeroFrame(2560))
+	ev = waitEvent(t, ch)
+	if !ev.Initial || ev.State != mute.Unmuted {
+		t.Errorf("after Reseed with unchanged state, event = %+v; want Initial=true State=unmuted", ev)
+	}
+
+	// A real transition after the reseed fires as usual.
+	src.OnFrame(zeroFrame(2560))
+	ev = waitEvent(t, ch)
+	if ev.Initial || ev.State != mute.Muted {
+		t.Errorf("transition after Reseed = %+v; want Initial=false State=muted", ev)
+	}
+}
+
+func TestSource_ReseedBeforeWatchIsHarmless(t *testing.T) {
+	src := NewSource(discardLogger())
+	src.Reseed()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ch, err := src.Watch(ctx)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	src.OnFrame(zeroFrame(2560))
+	if ev := waitEvent(t, ch); !ev.Initial {
+		t.Errorf("first event after Watch = %+v; want Initial", ev)
+	}
+}
