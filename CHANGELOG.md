@@ -6,6 +6,10 @@ Entries describe what changed for someone running or building dicta. The complet
 
 ## [Unreleased]
 
+### Fixed
+
+- `dicta suspend` left an open type-mode session running. The `--unmute-to-dictate` watcher opened the session on unmute, suspending only stopped it from reacting to further mute events, and the mic button could no longer close what it had opened. The daemon then kept transcribing and typing until something else closed the session. Suspending now closes any type-mode session, whether the suspend is manual or triggered by the flap guard. Clip-mode sessions are not touched.
+
 ## [0.1.3] - 2026-09-20
 
 ### Added
