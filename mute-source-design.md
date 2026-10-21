@@ -367,7 +367,10 @@ change to either. Tests cover both shapes against captured
 mid-stream (USB mic unplugged), the source logs and closes its
 channel — same as a terminal error. The watcher gives up; if the
 user replugs and wants the feature back, they restart dictad. (A
-re-attach implementation is a follow-up.)
+re-attach implementation is a follow-up.) Under `auto` this only
+matters if the pipewire source won the lock; the daemon-level
+device-absence handling in §13 is driven by the capture stream, not
+by this source, and keeps working for `pcm-zero`.
 
 ## 7. Configuration
 
@@ -635,3 +638,65 @@ the double-tap window before acting, delaying every session open. Given
 already cover the need, this is deferred unless those prove
 insufficient in practice. If revisited, gate it behind its own flag so
 the single-tap latency is opt-in.
+
+## 13. Device absence (implemented 2026-10-21)
+
+Real-world failure that motivated this section: the dictation mic is a
+USB device on a hub that gets knocked. The mic drops off the bus for a
+second or two and comes back. Two things went wrong, one in capture
+and one in the watcher.
+
+**Capture followed the default.** WirePlumber's stock linking policy
+moves a stream to the default source when its named target vanishes.
+`pw-record --target=<mxl>` therefore started capturing from whatever
+other mic was present, `pcm-zero` saw real audio and reported
+unmuted, and the watcher opened a session on a mic the user never
+meant to dictate into. When the MXL returned, the stream moved back
+and the MXL's power-up state (muted) fired a close. A hub reset that
+re-enumerates several devices produced a burst of these and tripped
+the flap guard.
+
+**Fix, capture side.** `internal/audio` starts `pw-record` with
+`-P '{ node.dont-fallback = true node.linger = true }'` whenever a
+device is named. `node.dont-fallback` forbids the relink;
+`node.linger` makes WirePlumber keep the stream waiting instead of
+sending the client an error and destroying the node. Verified on
+PipeWire 1.6 with a virtual source created and removed under a live
+`pw-record`: no bytes before the node exists, bytes while it does,
+none after removal, bytes again on recreation, no leftover stream
+node after exit. `pw-record` itself never has to be restarted.
+
+**Fix, daemon side.** With the stream pinned, device absence shows up
+as a gap in the frame stream. The audio monitor runs a stall watchdog
+(`--capture-stall-timeout`, default 1 s, armed from start so a mic
+that has not enumerated yet is reported too). On a stall it fires
+`onCaptureLost` once, and on the next frame `onCaptureRestored`.
+`main` wires those to three things, all non-blocking because they run
+on the audio goroutine:
+
+1. `pcmzero.Source.Reseed()` forgets the last observation, so the
+   first frame from the returning device is emitted as an `Initial`
+   event. The watcher already treats `Initial` as seed-without-fire,
+   so the device's power-up state is never a transition.
+2. `muteWatcher.DeviceLost()` sets an `absent` flag synchronously and
+   nudges `Run` to drop any pending debounce timer. While absent,
+   events are tracked but never fired and nothing counts toward the
+   flap guard. `DeviceRestored()` clears the flag; the watcher does
+   not resume from its pre-loss state but waits for the reseed.
+   `dicta status` reports `auto_activation: device absent`; a suspend
+   still takes precedence because it is the user's sticky choice.
+3. `session.OnCaptureLost()` closes an open type-mode session with
+   the usual close tone and the log reason `device absent`. Clip-mode
+   is left open (nothing leaves the panel until Enter). The close is
+   handed to a goroutine because `close` flushes the audio loop.
+
+Ordering matters only in one place: the watcher's `absent` flag is set
+synchronously, before the session close is spawned, so a debounce
+timer that expires during the loss finds the flag and does nothing.
+
+**What this does not cover.** The pipewire source still closes its
+channel when the node it polls disappears (§6.2); under `auto` that
+is harmless once `pcm-zero` has won the lock, and fatal to the watcher
+if pipewire won. A `pw-record` that exits (PipeWire restart, crash) is
+still not respawned; the audio monitor's loop ends and `dicta status`
+shows `running: false`. Both are follow-ups.
