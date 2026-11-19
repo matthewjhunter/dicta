@@ -63,6 +63,30 @@ a single static Go binary that:
 to the daemon over a Unix socket. `dicta-preview` is the clip-mode
 panel, spawned on demand. ydotoold and the ASR backend are external.
 
+## Quick start with Nix
+
+On a Wayland desktop with PipeWire and Nix flakes enabled, start the daemon
+in your desktop session. Replace `whisper-host` with your Wyoming server:
+
+```sh
+nix run 'github:matthewjhunter/dicta#dictad' -- \
+  --asr-backend wyoming --asr-wyoming-addr 'tcp://whisper-host:10300'
+```
+
+In a second terminal, open the dictation panel, speak, and press Enter to
+copy the transcript to the clipboard:
+
+```sh
+nix run 'github:matthewjhunter/dicta#dicta' -- toggle_talk --mode clip
+```
+
+The client is also the default app. From a local checkout, use
+`nix run '.#dictad'` for the daemon and `nix run '.#dicta'` for the client.
+
+For direct typing on NixOS, enable `programs.ydotool.enable = true;` and
+add your desktop user to the `ydotool` group. After rebuilding and logging
+back in, use `toggle_talk --mode type`.
+
 ## Quick start
 
 ### 1. Install build deps
